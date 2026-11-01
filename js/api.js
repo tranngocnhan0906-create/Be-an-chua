@@ -94,11 +94,16 @@ export const api = {
   },
 
   async loadAll() {
-    const [profiles, settingsRows, reactions, comments] = await Promise.all([
+    const [profiles, settingsRows, reactions, comments, messages] = await Promise.all([
       sb.from('profiles').select('id,display_name,avatar,created_at').order('created_at').then(must),
       sb.from('couple_settings').select('*').eq('id', 1).then(must),
       sb.from('reactions').select('id,meal_id,user_id,emoji,created_at').then(must),
       sb.from('comments').select('id,meal_id,user_id,body,created_at').order('created_at').then(must),
+      sb.from('messages')
+        .select('id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,created_at,read_at')
+        .order('created_at', { ascending: false })
+        .limit(600)
+        .then(must),
     ]);
     const meals = [];
     for (let from = 0; ; from += 1000) {
@@ -112,7 +117,7 @@ export const api = {
       meals.push(...page);
       if (page.length < 1000) break;
     }
-    return { profiles, settings: settingsRows[0] || null, meals, reactions, comments };
+    return { profiles, settings: settingsRows[0] || null, meals, reactions, comments, messages: messages.reverse() };
   },
 
   async upload(path, blob, contentType, onProgress) {
@@ -198,6 +203,25 @@ export const api = {
     must(await sb.from('comments').delete().eq('id', id));
   },
 
+  async sendMessage(body, recipientId) {
+    return must(
+      await sb
+        .from('messages')
+        .insert({ kind: 'text', body, recipient_id: recipientId })
+        .select('id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,created_at,read_at')
+        .single(),
+    );
+  },
+
+  async markRead(ids) {
+    if (!ids.length) return;
+    must(await sb.from('messages').update({ read_at: new Date().toISOString() }).in('id', ids).is('read_at', null));
+  },
+
+  async deleteMessage(id) {
+    must(await sb.from('messages').delete().eq('id', id));
+  },
+
   async updateSettings(patch) {
     return must(await sb.from('couple_settings').update({ ...patch, updated_at: new Date().toISOString() }).eq('id', 1).select().single());
   },
@@ -208,7 +232,7 @@ export const api = {
 
   subscribe(onChange, onStatus) {
     const ch = sb.channel('be-an-chua-db');
-    for (const table of ['meals', 'reactions', 'comments', 'couple_settings', 'profiles']) {
+    for (const table of ['meals', 'reactions', 'comments', 'couple_settings', 'profiles', 'messages']) {
       ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload) => onChange(table, payload));
     }
     ch.subscribe((status) => onStatus?.(status));

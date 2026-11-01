@@ -5,12 +5,13 @@ import {
   MEALS, MEAL_BY_KEY, MAIN_MEALS, MOODS, AVATARS, WEEKDAYS_SHORT,
   mealForTime, mealDay, addDays, daysBetween, fmtDayLong, fmtDmy, relDay, fmtTime, timeAgo,
   monthTitle, addMonths, daysInMonth, weekdayOf, esc, fmtBytes, uuid, computeStreak, loveInfo,
-  isIOS, isAndroid, isStandalone,
+  isIOS, isAndroid, isStandalone, ymd,
 } from './util.js';
 import { processFile } from './media.js';
 import { cat, ICONS } from './art.js';
 
 const app = document.getElementById('app');
+const QUICK_REPLIES = ['Ăn chưa nè? 🍚', 'Ăn rồi nè 😋', 'Nhớ quá à 🥺', 'Thương nhiều 💗', 'Đi ngủ sớm nha 🌙', 'Tí nhắn nha 💼'];
 
 const state = {
   uid: null,
@@ -20,6 +21,7 @@ const state = {
   hearts: new Map(), // mealId -> Map(userId -> reaction)
   heartById: new Map(),
   comments: new Map(), // mealId -> [comment]
+  messages: new Map(), // tin nhắn
   filter: 'all',
   route: { name: 'day', date: null },
   loadedAt: 0,
@@ -124,6 +126,7 @@ async function loadData() {
   for (const r of d.reactions) addHeartState(r);
   state.comments = new Map();
   for (const c of d.comments) addCommentState(c);
+  state.messages = new Map((d.messages || []).map((m) => [m.id, m]));
   state.loadedAt = Date.now();
   document.title = state.settings.app_name || 'Bé ăn chưa?';
 }
@@ -193,6 +196,11 @@ function onDbChange(table, p) {
     if (brand) brand.textContent = state.settings.app_name;
   } else if (table === 'profiles') {
     if (n.id) state.profiles.set(n.id, { ...(state.profiles.get(n.id) || {}), ...n });
+  } else if (table === 'messages') {
+    if (state.route.name === 'chat') state.chatStick = isNearBottom();
+    if (p.eventType === 'DELETE') state.messages.delete(o.id);
+    else if (n.id) state.messages.set(n.id, { ...(state.messages.get(n.id) || {}), ...n });
+    refreshBadge();
   }
   scheduleRender();
 }
@@ -222,6 +230,9 @@ const people = () => {
 const nameOf = (uid) => state.profiles.get(uid)?.display_name || 'Người thương';
 const avatarOf = (uid) => state.profiles.get(uid)?.avatar || '🐱';
 const allMeals = () => [...state.meals.values()];
+const ownerId = () => [...state.profiles.values()]
+  .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))[0]?.id;
+const nonOwner = () => [...state.profiles.values()].find((p) => p.id !== ownerId());
 
 function mealsOn(date, filter = state.filter) {
   return allMeals()
@@ -383,28 +394,37 @@ function renderShell() {
   app.innerHTML = `
   <header class="topbar">
     <a class="brand" href="#/">${cat({ size: 36, mood: 'happy' })}<span class="brand-name">${esc(state.settings.app_name || 'Bé ăn chưa?')}</span></a>
-    <a class="me-chip" href="#/settings" aria-label="Cài đặt">${esc(avatarOf(state.uid))}</a>
+    <a class="me-chip" href="#/settings" aria-label="Cài đặt"><span class="me-av">${esc(avatarOf(state.uid))}</span><span class="me-gear">${ICONS.gear}</span></a>
   </header>
   <main id="view" class="view"></main>
   <nav class="tabbar" aria-label="Điều hướng">
     <a href="#/" data-tab="day" class="tab">${ICONS.home}<span>Hôm nay</span></a>
     <a href="#/cal" data-tab="cal" class="tab">${ICONS.calendar}<span>Nhật ký</span></a>
     <button class="fab" data-action="new" aria-label="Đăng bữa ăn">${ICONS.plus}</button>
+    <a href="#/chat" data-tab="chat" class="tab">${ICONS.chat}<span>Tin nhắn</span><i class="tab-badge" hidden></i></a>
     <a href="#/us" data-tab="us" class="tab">${ICONS.heart}<span>Hai đứa</span></a>
-    <a href="#/settings" data-tab="settings" class="tab">${ICONS.gear}<span>Cài đặt</span></a>
   </nav>
+  <div id="chatbar" class="chatbar" hidden>
+    <div class="quick">${QUICK_REPLIES.map((q) => `<button type="button" class="qchip" data-quick="${esc(q)}">${esc(q)}</button>`).join('')}</div>
+    <form id="chat-form" class="chat-form" autocomplete="off">
+      <input id="chat-text" maxlength="2000" placeholder="Nhắn gì đó…" enterkeyhint="send" autocomplete="off">
+      <button class="send-btn" type="submit" aria-label="Gửi">${ICONS.send}</button>
+    </form>
+  </div>
   <div id="overlays"></div>`;
+  refreshBadge();
 }
 
 function parseRoute() {
   const h = location.hash.replace(/^#\/?/, '');
-  const [a, b] = h.split('/');
+  const [a, b, c] = h.split('/');
   if (a === 'cal') return { name: 'cal', month: /^\d{4}-\d{2}$/.test(b || '') ? b : null };
   if (a === 'us') return { name: 'us' };
   if (a === 'settings') return { name: 'settings' };
+  if (a === 'chat') return { name: 'chat' };
   if (a === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(b || '')) return { name: 'day', date: b };
   if (a === 'p' && b) return { name: 'post', id: b };
-  if (a === 'new') return { name: 'new', meal: MEAL_BY_KEY[b] ? b : null };
+  if (a === 'new') return { name: 'new', meal: MEAL_BY_KEY[b] ? b : null, date: /^\d{4}-\d{2}-\d{2}$/.test(c || '') ? c : null };
   return { name: 'day', date: null };
 }
 
@@ -419,7 +439,7 @@ function onRoute() {
   }
   if (r.name === 'new') {
     if (!document.getElementById('view')?.innerHTML) renderView();
-    openComposer(r.meal, false);
+    openComposer(r.meal, r.date);
     return;
   }
   if (state.overlay) closeOverlayDom();
@@ -433,14 +453,31 @@ function renderView() {
   const view = document.getElementById('view');
   if (!view) return;
   const r = state.route;
+  const inChat = r.name === 'chat';
+  const wasChat = document.body.classList.contains('in-chat');
+  document.body.classList.toggle('in-chat', inChat);
+  const bar = document.getElementById('chatbar');
+  if (bar) bar.hidden = !inChat;
+  const prevScroll = window.scrollY;
   if (r.name === 'cal') view.innerHTML = viewCalendar();
   else if (r.name === 'us') view.innerHTML = viewUs();
   else if (r.name === 'settings') view.innerHTML = viewSettings();
+  else if (inChat) view.innerHTML = viewChat();
   else view.innerHTML = viewDay();
-  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.tab === (r.name === 'day' ? 'day' : r.name));
-  const chip = document.querySelector('.me-chip');
-  if (chip) chip.textContent = avatarOf(state.uid);
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.tab === r.name);
+  const av = document.querySelector('.me-av');
+  if (av) av.textContent = avatarOf(state.uid);
   hydrateMedia(view);
+  if (inChat) {
+    const input = document.getElementById('chat-text');
+    const p2 = partner();
+    if (input) input.placeholder = p2 ? `Nhắn cho ${p2.display_name}…` : 'Nhắn gì đó…';
+    if (!wasChat || state.chatStick) scrollChatBottom(!wasChat);
+    else window.scrollTo(0, prevScroll);
+    state.chatStick = false;
+    markChatRead();
+  }
+  refreshBadge();
 }
 
 // ============================================================ HÔM NAY
@@ -720,6 +757,7 @@ function viewSettings() {
 
     <div class="card form-card">
       <h3>Của chung hai đứa</h3>
+      <p class="hint">👑 Chủ app: <b>${esc(nameOf(ownerId()))}</b> (người tạo tài khoản đầu tiên)</p>
       <label class="field"><span>Tên app</span><input id="app-name" maxlength="40" value="${esc(s.app_name || 'Bé ăn chưa?')}"></label>
       <label class="field"><span>Ngày bắt đầu yêu 💘</span><input id="start-date" type="date" value="${esc(s.start_date || '')}" max="${mealDay()}"></label>
       <button class="btn primary" data-action="save-couple">Lưu</button>
@@ -737,7 +775,13 @@ function viewSettings() {
 
     <div class="card form-card">
       <h3>⏰ Nhắc giờ ăn</h3>
-      <p class="hint">Tới giờ mà chưa đăng bữa đó thì mèo nhắc. Dùng chung cho cả hai.</p>
+      <p class="hint">Tới giờ mà chưa đăng bữa đó thì mèo nhắc qua thông báo và trong mục Tin nhắn, kèm nút gửi báo cáo cho ${esc(nameOf(ownerId()))} 👑.</p>
+      <div class="field"><span>Nhắc ai?</span>
+        <div class="seg two inline-seg">
+          <button type="button" class="${s.remind_targets !== 'both' ? 'on' : ''}" data-remind-target="partner">Chỉ ${esc(nonOwner()?.display_name || 'người yêu')}</button>
+          <button type="button" class="${s.remind_targets === 'both' ? 'on' : ''}" data-remind-target="both">Cả hai</button>
+        </div>
+      </div>
       <label class="switch-row"><span>Bật nhắc giờ ăn</span>
         <input type="checkbox" id="rem-on" ${s.reminders_enabled !== false ? 'checked' : ''}><i class="switch"></i></label>
       <div class="time-grid">
@@ -847,6 +891,197 @@ async function enablePush(btn) {
   }
 }
 
+
+// ============================================================ TIN NHẮN
+function unreadCount() {
+  let n = 0;
+  for (const m of state.messages.values()) if (m.recipient_id === state.uid && !m.read_at) n++;
+  return n;
+}
+
+function refreshBadge() {
+  const n = unreadCount();
+  const b = document.querySelector('.tab-badge');
+  if (b) {
+    b.hidden = !n;
+    b.textContent = n > 9 ? '9+' : String(n);
+  }
+  try {
+    if (n) navigator.setAppBadge?.(n)?.catch?.(() => {});
+    else navigator.clearAppBadge?.()?.catch?.(() => {});
+  } catch { /* bỏ qua */ }
+}
+
+function isNearBottom() {
+  return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 180;
+}
+
+function scrollChatBottom(instant) {
+  requestAnimationFrame(() => {
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: instant ? 'auto' : 'smooth' });
+  });
+}
+
+const pendingRead = new Set();
+let readTimer = null;
+function markChatRead() {
+  if (document.visibilityState !== 'visible' || state.route.name !== 'chat') return;
+  const now = new Date().toISOString();
+  for (const m of state.messages.values()) {
+    if (m.recipient_id === state.uid && !m.read_at) {
+      m.read_at = now;
+      pendingRead.add(m.id);
+    }
+  }
+  if (!pendingRead.size) return;
+  refreshBadge();
+  clearTimeout(readTimer);
+  readTimer = setTimeout(() => {
+    const ids = [...pendingRead];
+    pendingRead.clear();
+    api.markRead(ids).catch(() => {});
+  }, 400);
+}
+
+function chatDayLabel(day) {
+  const diff = daysBetween(day, ymd(new Date()));
+  if (diff === 0) return 'Hôm nay';
+  if (diff === 1) return 'Hôm qua';
+  return fmtDayLong(day);
+}
+
+function isEmojiOnly(text) {
+  const t = String(text || '').trim();
+  return !!t && [...t].length <= 6 && /\p{Extended_Pictographic}/u.test(t) &&
+    /^(\p{Extended_Pictographic}|\p{Emoji_Component}|️|‍|\s)+$/u.test(t);
+}
+
+function reminderHtml(m) {
+  const mi = MEAL_BY_KEY[m.meal_type] || MEALS[0];
+  const forMe = m.recipient_id === state.uid;
+  const who = nameOf(m.recipient_id);
+  const other = [...state.profiles.values()].find((p) => p.id !== m.recipient_id);
+  const meal = m.meal_id ? state.meals.get(m.meal_id) : null;
+  const diff = m.meal_date ? daysBetween(m.meal_date, mealDay()) : 99;
+  const canReport = forMe && !m.meal_id && diff >= 0 && diff <= 1;
+  let action;
+  if (m.meal_id) {
+    action = `<div class="rc-done">✅ ${forMe ? 'Đã báo cáo' : `${esc(who)} đã báo cáo`}${meal ? ` · <button class="link-btn" data-open="${meal.id}">Xem hình</button>` : ''}</div>`;
+  } else if (canReport) {
+    action = `<button class="btn primary rc-btn" data-report="${m.meal_type}|${m.meal_date}">📸 Gửi báo cáo cho ${esc(other?.display_name || 'người thương')}</button>`;
+  } else if (forMe) {
+    action = `<div class="rc-note">Đã qua giờ báo cáo rồi 🥲</div>`;
+  } else {
+    action = `<div class="rc-note">⏳ Đang chờ ${esc(who)} báo cáo…</div>`;
+  }
+  return `
+    <div class="remind-card ${m.meal_id ? 'done' : ''}">
+      <div class="rc-top">${cat({ size: 34, mood: m.meal_id ? 'happy' : 'hungry' })}<span>Mèo nhắc ${forMe ? 'bạn' : esc(who)} · ${fmtTime(m.created_at)}</span></div>
+      <p>${mi.icon} ${esc(m.body || `Tới giờ ${mi.name.toLowerCase()} rồi nè!`)}</p>
+      ${action}
+    </div>`;
+}
+
+function msgHtml(m, grouped) {
+  if (m.kind === 'reminder') return reminderHtml(m);
+  const mine = m.sender_id === state.uid;
+  const time = fmtTime(m.created_at);
+  const av = mine ? '' : `<span class="msg-av">${grouped ? '' : esc(avatarOf(m.sender_id))}</span>`;
+  if (m.kind === 'report') {
+    const mi = MEAL_BY_KEY[m.meal_type] || MEALS[0];
+    const meal = m.meal_id ? state.meals.get(m.meal_id) : null;
+    const thumb = meal ? meal.thumb_path || (meal.media_type === 'image' ? meal.media_path : null) : null;
+    const inner = meal
+      ? `<button class="report-card" data-open="${meal.id}">
+           <span class="rp-ph">${thumb ? `<img data-path="${esc(thumb)}" alt="">` : '<span class="ph-video">🎬</span>'}${meal.media_type === 'video' ? `<span class="pc-play">${ICONS.play}</span>` : ''}</span>
+           <span class="rp-text"><b>📸 Báo cáo ${mi.name.toLowerCase()} ${mi.icon}</b>${m.body ? `<span class="rp-cap">${esc(m.body)}</span>` : ''}<time>${time}</time></span>
+         </button>`
+      : `<div class="bubble"><i>📸 Bài báo cáo ${mi.name.toLowerCase()} đã bị xoá</i><time>${time}</time></div>`;
+    return `<div class="msg ${mine ? 'mine' : ''}">${av}${inner}</div>`;
+  }
+  const big = isEmojiOnly(m.body);
+  return `
+    <div class="msg ${mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}">
+      ${av}
+      <div class="bubble ${big ? 'big-emoji' : ''} ${m.pending ? 'pending' : ''}" ${mine && !m.pending ? `data-bubble="${m.id}"` : ''}>${esc(m.body)}<time>${time}</time></div>
+      ${mine && !m.pending ? `<button class="unsend-btn" data-unsend="${m.id}" hidden>Thu hồi</button>` : ''}
+    </div>`;
+}
+
+function viewChat() {
+  const p2 = partner();
+  const list = [...state.messages.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const lastMine = [...list].reverse().find((m) => m.kind === 'text' && m.sender_id === state.uid);
+  let html = '';
+  let lastDay = null;
+  let prevKey = null;
+  for (const m of list) {
+    const day = ymd(new Date(m.created_at));
+    if (day !== lastDay) {
+      html += `<div class="chat-day"><span>${chatDayLabel(day)}</span></div>`;
+      lastDay = day;
+      prevKey = null;
+    }
+    const key = m.kind === 'text' ? m.sender_id : null;
+    html += msgHtml(m, key && key === prevKey);
+    prevKey = key;
+    if (lastMine && m.id === lastMine.id) {
+      html += `<div class="msg-status">${m.pending ? 'Đang gửi…' : m.read_at ? 'Đã xem ✓✓' : 'Đã gửi ✓'}</div>`;
+    }
+  }
+  const empty = `<div class="chat-empty">${cat({ size: 96, mood: 'love' })}<p>Chưa có tin nhắn nào.<br>Nhắn một câu thương thương đi 💌</p></div>`;
+  return `
+    <div class="chat-head">
+      <button class="icon-btn" data-action="chat-back" aria-label="Về trang chủ">${ICONS.left}</button>
+      <span class="chat-av">${esc(p2?.avatar || '💌')}</span>
+      <div class="chat-title"><b>${esc(p2?.display_name || 'Đang chờ người thương')}</b>
+        <small>${p2 ? 'Chỉ hai đứa mình thấy 🔒' : 'Gửi link app và mã mời cho người ấy nha'}</small></div>
+    </div>
+    <div class="chat-list">${list.length ? html : empty}</div>`;
+}
+
+async function sendChat(text) {
+  const body = String(text || '').trim();
+  if (!body) return;
+  const tempId = `tmp-${uuid()}`;
+  const recipient = partner()?.id || null;
+  state.messages.set(tempId, { id: tempId, sender_id: state.uid, recipient_id: recipient, kind: 'text', body, created_at: new Date().toISOString(), pending: true });
+  state.chatStick = true;
+  renderView();
+  try {
+    const row = await api.sendMessage(body, recipient);
+    state.messages.delete(tempId);
+    state.messages.set(row.id, { ...(state.messages.get(row.id) || {}), ...row });
+  } catch (e) {
+    state.messages.delete(tempId);
+    toast(e.message, 'error');
+    const input = document.getElementById('chat-text');
+    if (input && !input.value) input.value = body;
+  }
+  state.chatStick = true;
+  scheduleRender();
+}
+
+// Bàn phím điện thoại che khung nhập: đẩy thanh nhắn tin lên theo bàn phím
+if (window.visualViewport) {
+  const onViewport = () => {
+    const vv = window.visualViewport;
+    const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    document.documentElement.style.setProperty('--kb', `${kb}px`);
+    const open = kb > 80;
+    if (open !== document.body.classList.contains('kb-open')) {
+      document.body.classList.toggle('kb-open', open);
+      if (open && state.route.name === 'chat') scrollChatBottom(true);
+    }
+  };
+  window.visualViewport.addEventListener('resize', onViewport);
+  window.visualViewport.addEventListener('scroll', onViewport);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.uid) markChatRead();
+});
+
 // ============================================================ lớp phủ (đăng bài / xem bài / sheet)
 function overlayRoot() {
   return document.getElementById('overlays');
@@ -895,13 +1130,16 @@ function navOverlay(hash) {
 }
 
 // ------------------------------------------------------------ Đăng bữa
-function openComposer(mealKey, _fromRoute) {
+function openComposer(mealKey, date) {
   const pushed = !!state.pendingPush;
   state.pendingPush = false;
   if (state.overlay?.kind === 'composer') return;
+  const today = mealDay();
+  const report = !!date && state.route.name === 'chat';
   state.composer = {
     meal: mealKey || mealForTime(),
-    day: 'today',
+    day: date && date === addDays(today, -1) ? 'yesterday' : 'today',
+    reportTo: report ? partner()?.id || null : null,
     media: null,
     processing: false,
     caption: '',
@@ -941,7 +1179,7 @@ function composerHtml() {
     <div class="sheet composer-sheet">
       <div class="grab"></div>
       <div class="sheet-head">
-        <h3>Đăng bữa ăn ${MEAL_BY_KEY[c.meal].icon}</h3>
+        <h3>${c.reportTo ? `Báo cáo cho ${esc(nameOf(c.reportTo))} 📸` : `Đăng bữa ăn ${MEAL_BY_KEY[c.meal].icon}`}</h3>
         <button class="icon-btn" data-action="close-overlay" aria-label="Đóng">${ICONS.close}</button>
       </div>
       ${mediaBlock}
@@ -961,7 +1199,7 @@ function composerHtml() {
       </div>
       ${c.busy ? `<div class="upload-bar"><i style="width:${Math.round(c.progress * 100)}%"></i></div>` : ''}
       <button class="btn primary block big-btn" data-action="submit-meal" ${!c.media || c.busy || c.processing ? 'disabled' : ''}>
-        ${c.busy ? `Đang gửi… ${Math.round(c.progress * 100)}%` : 'Đăng nè 💌'}
+        ${c.busy ? `Đang gửi… ${Math.round(c.progress * 100)}%` : c.reportTo ? 'Gửi báo cáo 📸' : 'Đăng nè 💌'}
       </button>
     </div>`;
 }
@@ -1040,6 +1278,16 @@ async function submitMeal() {
     const after = MAIN_MEALS.filter((k) => allMeals().some((m) => m.user_id === state.uid && m.meal_date === mealDate && m.meal_type === k)).length;
     if (c.media.previewUrl) URL.revokeObjectURL(c.media.previewUrl);
     closeOverlay();
+    if (c.reportTo) {
+      // báo cáo từ khung chat: ở lại khung chat, tin báo cáo sẽ hiện ngay
+      setTimeout(() => {
+        hearts(window.innerWidth / 2, window.innerHeight * 0.6, 14, ['📸', '💗', '🍚', '🐾']);
+        toast(`Đã gửi báo cáo cho ${nameOf(c.reportTo)} 📸`);
+        state.chatStick = true;
+        scheduleRender();
+      }, 120);
+      return;
+    }
     const target = mealDate === mealDay() ? '#/' : `#/day/${mealDate}`;
     setTimeout(() => {
       if (location.hash !== target && !(target === '#/' && (location.hash === '' || location.hash === '#/'))) location.hash = target;
@@ -1238,7 +1486,7 @@ function maybeWelcome() {
       <p class="center muted">Mỗi bữa ăn chụp một tấm cho người thương xem nha.</p>
       ${install}
       <h4>${install ? '2' : '1'}. Bật thông báo</h4>
-      <p class="hint">Để biết khi người ấy đăng bữa ăn và được nhắc giờ ăn. ${ios && !standalone ? 'Trên iPhone cần làm bước 1 trước, rồi vào Cài đặt trong app để bật.' : ''}</p>
+      <p class="hint">Để biết khi người ấy đăng bữa ăn và được nhắc giờ ăn. ${ios && !standalone ? 'Trên iPhone cần làm bước 1 trước, rồi bấm hình đại diện ở góc trên → Cài đặt để bật.' : ''}</p>
       <div class="btn-row">
         ${!(ios && !standalone) ? `<button class="btn ghost" data-action="enable-push">Bật thông báo</button>` : ''}
         <button class="btn primary" data-action="close-overlay">Bắt đầu thôi 💕</button>
@@ -1248,8 +1496,38 @@ function maybeWelcome() {
 
 // ============================================================ sự kiện
 document.addEventListener('click', async (e) => {
-  const t = e.target.closest('button, a, [data-action], label');
+  const t = e.target.closest('button, a, [data-action], label, [data-bubble]');
   if (!t) return;
+
+  if (t.dataset.bubble) {
+    const b = document.querySelector(`[data-unsend="${t.dataset.bubble}"]`);
+    if (b) b.hidden = !b.hidden;
+    return;
+  }
+  if (t.dataset.unsend) {
+    if (!confirm('Thu hồi tin nhắn này nha?')) return;
+    try {
+      await api.deleteMessage(t.dataset.unsend);
+      state.messages.delete(t.dataset.unsend);
+      renderView();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    return;
+  }
+  if (t.dataset.quick) {
+    sendChat(t.dataset.quick);
+    return;
+  }
+  if (t.dataset.report) {
+    const [meal, date] = t.dataset.report.split('|');
+    navOverlay(`#/new/${meal}/${date}`);
+    return;
+  }
+  if (t.dataset.remindTarget) {
+    t.closest('.seg').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === t));
+    return;
+  }
 
   if (t.dataset.authMode) return showAuth(t.dataset.authMode);
   if (t.classList.contains('av-opt') && t.closest('.avatar-pick')) {
@@ -1345,6 +1623,9 @@ document.addEventListener('click', async (e) => {
     case 'close-overlay':
       closeOverlay();
       break;
+    case 'chat-back':
+      location.hash = '#/';
+      break;
     case 'submit-meal':
       submitMeal();
       break;
@@ -1430,6 +1711,7 @@ document.addEventListener('click', async (e) => {
       try {
         state.settings = await api.updateSettings({
           reminders_enabled: document.getElementById('rem-on').checked,
+          remind_targets: document.querySelector('[data-remind-target].on')?.dataset.remindTarget || 'partner',
           remind_sang: document.getElementById('rem-sang').value || '09:30',
           remind_trua: document.getElementById('rem-trua').value || '13:00',
           remind_toi: document.getElementById('rem-toi').value || '20:00',
@@ -1452,6 +1734,13 @@ document.addEventListener('submit', (e) => {
   } else if (e.target.id === 'cmt-form') {
     e.preventDefault();
     sendComment(e.target);
+  } else if (e.target.id === 'chat-form') {
+    e.preventDefault();
+    const input = document.getElementById('chat-text');
+    const text = input.value;
+    input.value = '';
+    input.focus();
+    sendChat(text);
   }
 });
 

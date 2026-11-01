@@ -137,7 +137,7 @@ async function pushTo(userIds: string[], data: { title: string; body: string; ta
 
 // ---------- Bài / tim / bình luận mới ----------
 async function handleEvent(table: string, id: string) {
-  if (!["meals", "comments", "reactions"].includes(table) || !UUID_RE.test(id)) return { skipped: "bad input" };
+  if (!["meals", "comments", "reactions", "messages"].includes(table) || !UUID_RE.test(id)) return { skipped: "bad input" };
 
   // "Giành quyền" gửi: chỉ dòng chưa thông báo mới được gửi (chống gửi trùng)
   // deno-lint-ignore no-explicit-any
@@ -150,6 +150,20 @@ async function handleEvent(table: string, id: string) {
   if (!row) return { skipped: "already notified or missing" };
 
   const people = await profilesMap();
+
+  // Tin nhắn chữ: báo cho người nhận
+  if (table === "messages") {
+    if (row.kind !== "text") return { skipped: "not text" };
+    const sender = people.get(row.sender_id);
+    const to = row.recipient_id ? [row.recipient_id] : [...people.keys()].filter((uid) => uid !== row.sender_id);
+    return await pushTo(to, {
+      title: `💬 ${sender?.avatar ?? ""} ${sender?.display_name ?? "Người thương"}`.replace(/\s+/g, " "),
+      body: truncate(row.body ?? "", 160),
+      tag: `chat-${row.sender_id}`,
+      url: "#/chat",
+    });
+  }
+
   const actorName = people.get(row.user_id)?.display_name ?? "Người thương";
 
   let meal = row;
@@ -211,13 +225,18 @@ async function handleRemind() {
   }).map(([type]) => type);
   if (!due.length) return { due };
 
-  const people = await profilesMap();
+  const people = await profilesMap(); // xếp theo ngày tạo: người đầu tiên là chủ app
+  const ownerId = [...people.keys()][0];
+  const targets = settings.remind_targets === "both"
+    ? [...people.keys()]
+    : [...people.keys()].filter((uid) => uid !== ownerId);
   const out = [];
   for (const type of due) {
     const label = MEAL_LABEL[type];
     const meals = await rest<{ user_id: string }[]>(`meals?select=user_id&meal_date=eq.${mealDay}&meal_type=eq.${type}`);
     const done = new Set(meals.map((m) => m.user_id));
-    for (const [uid, p] of people) {
+    for (const uid of targets) {
+      const p = people.get(uid)!;
       if (done.has(uid)) continue;
       const inserted = await rest<unknown[]>("reminder_log?on_conflict=user_id,meal_date,meal_type", {
         method: "POST",
@@ -226,13 +245,21 @@ async function handleRemind() {
       });
       if (!inserted?.length) continue; // đã nhắc rồi
       const partner = [...people.values()].find((x) => x.id !== uid);
+      const text = partner
+        ? `Tới giờ ${label} rồi nè ${p.display_name}! ${partner.display_name} đang chờ báo cáo ${label} đó 🥺`
+        : `Tới giờ ${label} rồi nè! Nhớ ăn rồi chụp hình nha 🐱`;
+      await rest("messages", {
+        method: "POST",
+        prefer: "return=minimal",
+        body: { sender_id: null, recipient_id: uid, kind: "reminder", body: text, meal_type: type, meal_date: mealDay },
+      }).catch((e) => console.warn("reminder message", String(e)));
       const r = await pushTo([uid], {
         title: `⏰ Tới giờ ${label} rồi nè!`,
         body: partner
-          ? `${partner.display_name} đang chờ xem ${label} của ${p.display_name} đó 🥺`
+          ? `${partner.display_name} đang chờ báo cáo ${label} của ${p.display_name} đó 🥺`
           : `Nhớ ăn ${label} rồi chụp hình nha 🐱`,
         tag: `remind-${type}`,
-        url: `#/new/${type}`,
+        url: "#/chat",
       });
       out.push({ uid, type, ...r });
     }

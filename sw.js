@@ -1,12 +1,12 @@
 // Service worker: chạy offline cơ bản + nhận thông báo đẩy
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const SHELL = `bac-shell-${VERSION}`;
 const RUNTIME = 'bac-runtime';
 const SHELL_FILES = [
   './',
   './index.html',
-  './css/app.css?v=1.0.0',
-  './js/app.js?v=1.0.0',
+  './css/app.css?v=1.1.0',
+  './js/app.js?v=1.1.0',
   './js/api.js',
   './js/config.js',
   './js/util.js',
