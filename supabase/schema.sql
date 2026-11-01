@@ -197,11 +197,15 @@ begin
   values (
     new.id,
     new.email,
-    coalesce(nullif(left(btrim(new.raw_user_meta_data->>'display_name'), 40), ''), split_part(new.email, '@', 1)),
+    coalesce(nullif(left(btrim(new.raw_user_meta_data->>'display_name'), 40), ''),
+             nullif(left(split_part(coalesce(new.email, ''), '@', 1), 40), ''),
+             'Người thương'),
     coalesce(nullif(left(new.raw_user_meta_data->>'avatar', 16), ''), '🐱')
   );
   return new;
 end $$;
+
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
@@ -228,6 +232,8 @@ begin
 exception when others then
   return new; -- không bao giờ chặn việc đăng bài vì lỗi thông báo
 end $$;
+
+revoke execute on function public.notify_event() from public, anon, authenticated;
 
 drop trigger if exists meals_notify on public.meals;
 create trigger meals_notify after insert on public.meals
