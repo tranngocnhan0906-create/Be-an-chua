@@ -1,17 +1,19 @@
-// Bé ăn chưa? — giao diện chính
+// Bé ăn chưa? — bản 2.0: Lịch ăn của Ny · Tin nhắn · Chị 🍓
 import { api } from './api.js';
 import { CONFIG } from './config.js';
 import {
-  MEALS, MEAL_BY_KEY, MAIN_MEALS, MOODS, AVATARS, WEEKDAYS_SHORT,
+  MEALS, MEAL_BY_KEY, MAIN_MEALS, MOODS, AVATARS,
   mealForTime, mealDay, addDays, daysBetween, fmtDayLong, fmtDmy, relDay, fmtTime, timeAgo,
   monthTitle, addMonths, daysInMonth, weekdayOf, esc, fmtBytes, uuid, computeStreak, loveInfo,
   isIOS, isAndroid, isStandalone, ymd,
+  schedMinutes, fmtHM, schedDate, fmtDur, lateInfo, cyclePredict, cycleStatus, cycleDayKinds,
 } from './util.js';
 import { processFile } from './media.js';
 import { cat, ICONS } from './art.js';
 
 const app = document.getElementById('app');
-const QUICK_REPLIES = ['Ăn chưa nè? 🍚', 'Ăn rồi nè 😋', 'Nhớ quá à 🥺', 'Thương nhiều 💗', 'Đi ngủ sớm nha 🌙', 'Tí nhắn nha 💼'];
+const QUICK_OWNER = ['Ăn chưa nè? 🍚', 'Ăn đúng giờ nha ⏰', 'Giỏi quá 👏', 'Nhớ quá à 🥺', 'Thương nhiều 💗'];
+const QUICK_NY = ['Ăn rồi nè 😋', 'Đang ăn nè 🍜', 'Tí ăn liền 🥺', 'Nhớ quá à 🥺', 'Thương nhiều 💗'];
 
 const state = {
   uid: null,
@@ -20,17 +22,19 @@ const state = {
   meals: new Map(),
   hearts: new Map(), // mealId -> Map(userId -> reaction)
   heartById: new Map(),
-  comments: new Map(), // mealId -> [comment]
-  messages: new Map(), // tin nhắn
-  filter: 'all',
+  messages: new Map(),
+  cycles: new Map(),
   route: { name: 'day', date: null },
   loadedAt: 0,
   unsubscribe: null,
   installPrompt: null,
-  overlay: null, // { kind: 'viewer'|'composer'|'sheet', pushed: bool, id? }
+  overlay: null, // { kind, pushed, id }
   composer: null,
   viewerDraft: '',
   pushOn: false,
+  chatStick: false,
+  chatStickUntil: 0,
+  cycleMonth: null,
 };
 
 // ============================================================ khởi động
@@ -53,7 +57,7 @@ boot();
 
 async function boot() {
   if (!api.configured) {
-    app.innerHTML = `<div class="center-screen">${cat({ size: 120, mood: 'sleep' })}<h2>App chưa được cấu hình</h2><p class="muted">Thiếu địa chỉ Supabase trong <code>js/config.js</code>.</p></div>`;
+    app.innerHTML = `<div class="center-screen">${cat({ size: 120, mood: 'sleep' })}<h2>App chưa được cấu hình</h2></div>`;
     return;
   }
   let session = null;
@@ -72,16 +76,10 @@ async function boot() {
 
 function teardown() {
   state.unsubscribe?.();
-  state.unsubscribe = null;
-  state.uid = null;
-  state.profiles = new Map();
-  state.meals = new Map();
-  state.hearts = new Map();
-  state.heartById = new Map();
-  state.comments = new Map();
-  state.settings = null;
-  state.overlay = null;
-  state.loadedAt = 0;
+  Object.assign(state, {
+    unsubscribe: null, uid: null, profiles: new Map(), meals: new Map(), hearts: new Map(), heartById: new Map(),
+    messages: new Map(), cycles: new Map(), settings: null, overlay: null, loadedAt: 0,
+  });
 }
 
 let entering = null;
@@ -124,15 +122,15 @@ async function loadData() {
   state.hearts = new Map();
   state.heartById = new Map();
   for (const r of d.reactions) addHeartState(r);
-  state.comments = new Map();
-  for (const c of d.comments) addCommentState(c);
   state.messages = new Map((d.messages || []).map((m) => [m.id, m]));
+  state.cycles = new Map((d.cycles || []).map((c) => [c.id, c]));
   state.loadedAt = Date.now();
   document.title = state.settings.app_name || 'Bé ăn chưa?';
 }
 
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible' || !state.uid || !state.loadedAt) return;
+  markChatRead();
   if (Date.now() - state.loadedAt < 45e3) return;
   try {
     await loadData();
@@ -141,6 +139,12 @@ document.addEventListener('visibilitychange', async () => {
     scheduleRender();
   } catch { /* lần sau thử lại */ }
 });
+
+// Đồng hồ: cập nhật số phút trễ bữa mỗi phút
+setInterval(() => {
+  if (!state.uid || document.visibilityState !== 'visible') return;
+  if (state.route.name === 'day' || state.route.name === 'cycle') scheduleRender();
+}, 60e3);
 
 // ============================================================ trạng thái dữ liệu
 function addHeartState(r) {
@@ -153,24 +157,6 @@ function removeHeartState(mealId, userId) {
   const r = m?.get(userId);
   m?.delete(userId);
   if (r?.id) state.heartById.delete(r.id);
-}
-function addCommentState(c) {
-  if (!state.comments.has(c.meal_id)) state.comments.set(c.meal_id, []);
-  const arr = state.comments.get(c.meal_id);
-  if (!arr.some((x) => x.id === c.id)) {
-    arr.push(c);
-    arr.sort((a, b) => a.created_at.localeCompare(b.created_at));
-  }
-}
-function removeCommentById(id) {
-  for (const [mid, arr] of state.comments) {
-    const i = arr.findIndex((c) => c.id === id);
-    if (i >= 0) {
-      arr.splice(i, 1);
-      if (!arr.length) state.comments.delete(mid);
-      return;
-    }
-  }
 }
 
 function onDbChange(table, p) {
@@ -186,9 +172,6 @@ function onDbChange(table, p) {
       const r = state.heartById.get(o.id);
       if (r) removeHeartState(r.meal_id, r.user_id);
     } else addHeartState(n);
-  } else if (table === 'comments') {
-    if (p.eventType === 'DELETE') removeCommentById(o.id);
-    else addCommentState(n);
   } else if (table === 'couple_settings') {
     if (n.id) state.settings = { ...state.settings, ...n };
     document.title = state.settings.app_name || 'Bé ăn chưa?';
@@ -197,10 +180,13 @@ function onDbChange(table, p) {
   } else if (table === 'profiles') {
     if (n.id) state.profiles.set(n.id, { ...(state.profiles.get(n.id) || {}), ...n });
   } else if (table === 'messages') {
-    if (state.route.name === 'chat') state.chatStick = isNearBottom();
+    if (state.route.name === 'chat') state.chatStick = state.chatStick || isNearBottom();
     if (p.eventType === 'DELETE') state.messages.delete(o.id);
     else if (n.id) state.messages.set(n.id, { ...(state.messages.get(n.id) || {}), ...n });
     refreshBadge();
+  } else if (table === 'cycles') {
+    if (p.eventType === 'DELETE') state.cycles.delete(o.id);
+    else if (n.id) state.cycles.set(n.id, { ...(state.cycles.get(n.id) || {}), ...n });
   }
   scheduleRender();
 }
@@ -212,7 +198,6 @@ function scheduleRender() {
   requestAnimationFrame(() => {
     renderQueued = false;
     if (!state.uid || !document.getElementById('view')) return;
-    // đừng vẽ lại khi đang gõ trong trang cài đặt
     const active = document.activeElement;
     const typingInView = active && document.getElementById('view').contains(active) && /INPUT|TEXTAREA|SELECT/.test(active.tagName);
     if (!typingInView) renderView();
@@ -220,33 +205,54 @@ function scheduleRender() {
   });
 }
 
-// ============================================================ tiện ích hiển thị
+// ============================================================ ai là ai
+const people = () => [...state.profiles.values()].sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+const ownerId = () => people()[0]?.id;
+const nyId = () => people()[1]?.id || null;
+const owner = () => state.profiles.get(ownerId());
+const ny = () => state.profiles.get(nyId());
+const isNy = () => !!state.uid && state.uid === nyId();
 const me = () => state.profiles.get(state.uid);
 const partner = () => [...state.profiles.values()].find((p) => p.id !== state.uid);
-const people = () => {
-  const list = [me(), partner()].filter(Boolean);
-  return list;
-};
 const nameOf = (uid) => state.profiles.get(uid)?.display_name || 'Người thương';
 const avatarOf = (uid) => state.profiles.get(uid)?.avatar || '🐱';
+const nyName = () => ny()?.display_name || 'Ny';
+const ownerName = () => owner()?.display_name || 'anh';
 const allMeals = () => [...state.meals.values()];
-const ownerId = () => [...state.profiles.values()]
-  .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))[0]?.id;
-const nonOwner = () => [...state.profiles.values()].find((p) => p.id !== ownerId());
+const nyMeals = () => allMeals().filter((m) => m.user_id === nyId());
 
-function mealsOn(date, filter = state.filter) {
-  return allMeals()
-    .filter((m) => m.meal_date === date && (filter === 'all' || m.user_id === filter))
+function nyMealsOn(date, type) {
+  return nyMeals()
+    .filter((m) => m.meal_date === date && (!type || m.meal_type === type))
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
-function heartCount(id) {
-  return state.hearts.get(id)?.size || 0;
-}
-function commentCount(id) {
-  return state.comments.get(id)?.length || 0;
+/** Trạng thái một bữa chính của Ny trong ngày */
+function slotStatus(date, type) {
+  const list = nyMealsOn(date, type);
+  const sched = schedMinutes(state.settings, type);
+  if (list.length) {
+    const late = Math.round((new Date(list[0].created_at) - schedDate(date, sched)) / 60000);
+    return { state: 'done', late, info: lateInfo(late), first: list[0], list, sched };
+  }
+  // bữa trước lúc Ny vào app thì không tính là bỏ bữa
+  const joined = ny()?.created_at ? new Date(ny().created_at) : null;
+  if (joined && schedDate(date, sched) < joined) return { state: 'none', list, sched };
+  const today = mealDay();
+  if (date < today) return { state: 'missed', list, sched };
+  if (date > today) return { state: 'future', list, sched };
+  const diff = Math.round((Date.now() - schedDate(date, sched)) / 60000);
+  if (diff < 0) return { state: 'upcoming', inMin: -diff, list, sched };
+  return { state: 'overdue', late: diff, list, sched };
 }
 
+const heartCount = (id) => state.hearts.get(id)?.size || 0;
+const mealComments = (id) => [...state.messages.values()]
+  .filter((m) => m.kind === 'text' && m.meal_id === id)
+  .sort((a, b) => a.created_at.localeCompare(b.created_at));
+const commentCount = (id) => mealComments(id).length;
+
+// ============================================================ hiệu ứng & ảnh
 function toast(msg, kind = 'ok', ms = 2800) {
   let box = document.getElementById('toasts');
   if (!box) {
@@ -272,12 +278,10 @@ function hearts(x, y, n = 14, chars = ['💗', '💕', '💖', '🐾', '✨']) {
     const s = document.createElement('span');
     s.className = 'fx-heart';
     s.textContent = chars[i % chars.length];
-    const dx = (Math.random() - 0.5) * 220;
-    const dy = -120 - Math.random() * 220;
     s.style.left = `${x}px`;
     s.style.top = `${y}px`;
-    s.style.setProperty('--dx', `${dx}px`);
-    s.style.setProperty('--dy', `${dy}px`);
+    s.style.setProperty('--dx', `${(Math.random() - 0.5) * 220}px`);
+    s.style.setProperty('--dy', `${-120 - Math.random() * 220}px`);
     s.style.setProperty('--r', `${(Math.random() - 0.5) * 80}deg`);
     s.style.animationDelay = `${Math.random() * 0.15}s`;
     s.style.fontSize = `${18 + Math.random() * 18}px`;
@@ -304,11 +308,12 @@ async function hydrateMedia(root = document) {
     el.dataset.ready = '1';
     if (el.dataset.poster && map.get(el.dataset.poster)) el.poster = map.get(el.dataset.poster);
     if (el.tagName === 'IMG') {
-      el.addEventListener('load', () => el.classList.add('loaded'), { once: true });
-      el.src = url;
-    } else {
-      el.src = url;
+      el.addEventListener('load', () => {
+        el.classList.add('loaded');
+        if (state.route.name === 'chat' && Date.now() < state.chatStickUntil) scrollChatBottom(true);
+      }, { once: true });
     }
+    el.src = url;
   }
 }
 
@@ -330,7 +335,7 @@ function showAuth(mode = 'login') {
       <form id="auth-form" novalidate>
         ${signup ? `
           <label class="field"><span>Tên gọi của bạn</span>
-            <input name="display_name" maxlength="40" placeholder="vd: Bé Heo, Anh Nhân" required autocomplete="nickname"></label>
+            <input name="display_name" maxlength="40" placeholder="vd: Bé Heo" required autocomplete="nickname"></label>
           <div class="field"><span>Chọn linh vật</span>
             <div class="avatar-pick small">${AVATARS.map((a, i) => `<button type="button" class="av-opt ${i === 0 ? 'on' : ''}" data-av="${a}">${a}</button>`).join('')}</div>
           </div>` : ''}
@@ -397,19 +402,25 @@ function renderShell() {
     <a class="me-chip" href="#/settings" aria-label="Cài đặt"><span class="me-av">${esc(avatarOf(state.uid))}</span><span class="me-gear">${ICONS.gear}</span></a>
   </header>
   <main id="view" class="view"></main>
-  <nav class="tabbar" aria-label="Điều hướng">
-    <a href="#/" data-tab="day" class="tab">${ICONS.home}<span>Hôm nay</span></a>
-    <a href="#/cal" data-tab="cal" class="tab">${ICONS.calendar}<span>Nhật ký</span></a>
-    <button class="fab" data-action="new" aria-label="Đăng bữa ăn">${ICONS.plus}</button>
-    <a href="#/chat" data-tab="chat" class="tab">${ICONS.chat}<span>Tin nhắn</span><i class="tab-badge" hidden></i></a>
-    <a href="#/us" data-tab="us" class="tab">${ICONS.heart}<span>Hai đứa</span></a>
+  <nav class="tabbar three" aria-label="Điều hướng">
+    <a href="#/" data-tab="day" class="tab">${ICONS.bowl}<span>Lịch ăn</span></a>
+    <a href="#/chat" data-tab="chat" class="tab-center" aria-label="Tin nhắn">
+      <span class="tc-bubble">${ICONS.chat}<i class="tab-badge" hidden></i></span><span>Tin nhắn</span>
+    </a>
+    <a href="#/cycle" data-tab="cycle" class="tab">${ICONS.cycle}<span>Chị 🍓</span></a>
   </nav>
   <div id="chatbar" class="chatbar" hidden>
-    <div class="quick">${QUICK_REPLIES.map((q) => `<button type="button" class="qchip" data-quick="${esc(q)}">${esc(q)}</button>`).join('')}</div>
+    <div class="quick" id="quick"></div>
     <form id="chat-form" class="chat-form" autocomplete="off">
+      <button type="button" class="attach-btn" data-action="attach" aria-label="Gửi ảnh, video">${ICONS.plus}</button>
       <input id="chat-text" maxlength="2000" placeholder="Nhắn gì đó…" enterkeyhint="send" autocomplete="off">
       <button class="send-btn" type="submit" aria-label="Gửi">${ICONS.send}</button>
     </form>
+    <div class="attach-menu" id="attach-menu" hidden>
+      <label class="am-item">${ICONS.image}<span>Ảnh / video</span><input type="file" accept="image/*,video/*" data-chat-pick hidden></label>
+      <label class="am-item">${ICONS.camera}<span>Chụp / quay</span><input type="file" accept="image/*,video/*" capture="environment" data-chat-pick hidden></label>
+      <button type="button" class="am-item ny-only" data-action="chat-report">🍱<span>Báo cáo bữa ăn</span></button>
+    </div>
   </div>
   <div id="overlays"></div>`;
   refreshBadge();
@@ -422,8 +433,10 @@ function parseRoute() {
   if (a === 'us') return { name: 'us' };
   if (a === 'settings') return { name: 'settings' };
   if (a === 'chat') return { name: 'chat' };
+  if (a === 'cycle') return { name: 'cycle' };
   if (a === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(b || '')) return { name: 'day', date: b };
   if (a === 'p' && b) return { name: 'post', id: b };
+  if (a === 'm' && b) return { name: 'media', id: b };
   if (a === 'new') return { name: 'new', meal: MEAL_BY_KEY[b] ? b : null, date: /^\d{4}-\d{2}-\d{2}$/.test(c || '') ? c : null };
   return { name: 'day', date: null };
 }
@@ -432,21 +445,24 @@ window.addEventListener('hashchange', () => state.uid && onRoute());
 
 function onRoute() {
   const r = parseRoute();
-  if (r.name === 'post') {
-    if (!document.getElementById('view')?.innerHTML) renderView();
-    openViewer(r.id, false);
-    return;
-  }
-  if (r.name === 'new') {
-    if (!document.getElementById('view')?.innerHTML) renderView();
-    openComposer(r.meal, r.date);
+  const viewEmpty = !document.getElementById('view')?.innerHTML;
+  if (r.name === 'post' || r.name === 'media' || r.name === 'new') {
+    if (viewEmpty) renderView();
+    if (r.name === 'post') openViewer(r.id);
+    else if (r.name === 'media') openMediaViewer(r.id);
+    else openComposer(r.meal, r.date);
     return;
   }
   if (state.overlay) closeOverlayDom();
   const changed = r.name !== state.route.name;
   state.route = r;
   renderView();
-  if (changed) window.scrollTo(0, 0);
+  if (changed && r.name !== 'chat') window.scrollTo(0, 0);
+}
+
+function tabOf(name) {
+  if (name === 'cal' || name === 'us') return 'day';
+  return name;
 }
 
 function renderView() {
@@ -456,15 +472,18 @@ function renderView() {
   const inChat = r.name === 'chat';
   const wasChat = document.body.classList.contains('in-chat');
   document.body.classList.toggle('in-chat', inChat);
+  document.body.classList.toggle('is-ny', isNy());
   const bar = document.getElementById('chatbar');
   if (bar) bar.hidden = !inChat;
   const prevScroll = window.scrollY;
   if (r.name === 'cal') view.innerHTML = viewCalendar();
   else if (r.name === 'us') view.innerHTML = viewUs();
   else if (r.name === 'settings') view.innerHTML = viewSettings();
+  else if (r.name === 'cycle') view.innerHTML = viewCycle();
   else if (inChat) view.innerHTML = viewChat();
   else view.innerHTML = viewDay();
-  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.tab === r.name);
+  const tab = tabOf(r.name);
+  for (const t of document.querySelectorAll('[data-tab]')) t.classList.toggle('on', t.dataset.tab === tab);
   const av = document.querySelector('.me-av');
   if (av) av.textContent = avatarOf(state.uid);
   hydrateMedia(view);
@@ -472,106 +491,154 @@ function renderView() {
     const input = document.getElementById('chat-text');
     const p2 = partner();
     if (input) input.placeholder = p2 ? `Nhắn cho ${p2.display_name}…` : 'Nhắn gì đó…';
-    if (!wasChat || state.chatStick) scrollChatBottom(!wasChat);
-    else window.scrollTo(0, prevScroll);
+    const quick = document.getElementById('quick');
+    const replies = isNy() ? QUICK_NY : QUICK_OWNER;
+    if (quick && quick.dataset.role !== String(isNy())) {
+      quick.dataset.role = String(isNy());
+      quick.innerHTML = replies.map((q) => `<button type="button" class="qchip" data-quick="${esc(q)}">${esc(q)}</button>`).join('');
+    }
+    if (!wasChat || state.chatStick) {
+      scrollChatBottom(!wasChat);
+      state.chatStickUntil = Date.now() + 2500; // ảnh tải xong vẫn giữ ở cuối
+    } else window.scrollTo(0, prevScroll);
     state.chatStick = false;
     markChatRead();
   }
   refreshBadge();
 }
 
-// ============================================================ HÔM NAY
+// ============================================================ LỊCH ĂN
+function waitingCard(text = 'Gửi link app và mã mời cho người ấy để bắt đầu theo dõi giờ ăn nha.') {
+  return `
+    <div class="card invite-card">
+      ${cat({ size: 64, mood: 'hungry' })}
+      <div><b>Đang chờ Ny vào app 💌</b>
+      <small>${text}</small>
+      <button class="btn small primary" data-action="copy-link">Sao chép link app</button></div>
+    </div>`;
+}
+
+function cyclePill() {
+  const pred = cyclePredict([...state.cycles.values()].filter((c) => c.user_id === nyId()), state.settings?.cycle_length, state.settings?.period_length);
+  const st = cycleStatus(pred, ymd(new Date()));
+  const text = {
+    period: `🍓 Chị đang ghé · ngày ${st.day}`,
+    pms: `🌋 Còn ${st.toNext} ngày chị 🍓 ghé`,
+    due: '📅 Hôm nay chị 🍓 có hẹn',
+    late: `⏰ Chị 🍓 trễ ${st.lateBy} ngày`,
+    ovulation: '🥚 Ngày rụng trứng',
+    fertile: '🌸 Ngày dễ thụ thai',
+  }[st.phase];
+  return text ? `<a class="pill straw" href="#/cycle">${text}</a>` : '';
+}
+
+function slotCardHtml(date, meal, canPost) {
+  const st = slotStatus(date, meal.key);
+  let chip;
+  let cls = '';
+  if (st.state === 'done') {
+    chip = `<span class="lt ${st.info.cls}">${st.info.icon} ${st.info.text} · ${fmtTime(st.first.created_at)}</span>`;
+    if (st.info.cls === 'late2') cls = 'warn';
+  } else if (st.state === 'overdue') {
+    chip = `<span class="lt red">🚨 Chưa ăn · trễ ${fmtDur(st.late)}</span>`;
+    cls = 'alert';
+  } else if (st.state === 'missed') {
+    chip = `<span class="lt red">😿 Bỏ bữa · không có hình</span>`;
+    cls = 'alert';
+  } else if (st.state === 'upcoming') {
+    chip = `<span class="lt soon">⏳ Còn ${fmtDur(st.inMin)} tới giờ ăn</span>`;
+  } else {
+    chip = '';
+  }
+  const cards = st.list.map((m) => postCard(m, meal.key)).join('');
+  let body = '';
+  if (st.list.length) {
+    body = `<div class="post-row">${cards}${canPost ? `<button class="add-card" data-new="${meal.key}" aria-label="Báo cáo thêm">${ICONS.plus}</button>` : ''}</div>`;
+  } else if (canPost) {
+    body = `<button class="report-btn ${cls === 'alert' ? 'urgent' : ''}" data-new="${meal.key}">📸 Báo cáo ${meal.name.toLowerCase()} cho ${esc(ownerName())}</button>`;
+  } else if (st.state === 'overdue') {
+    body = `<div class="empty-note red-note">${esc(nyName())} chưa gửi hình ${meal.name.toLowerCase()}
+      <button class="nudge-btn" data-action="nudge" data-meal="${meal.key}">💌 Nhắn nhắc ${esc(nyName())} ngay</button></div>`;
+  }
+  return `
+    <section class="meal-sec ${cls}" style="--mc: var(--m-${meal.key})">
+      <div class="meal-head">
+        <span class="meal-ico">${meal.icon}</span>
+        <div class="meal-title"><b>${meal.name}</b><small>Giờ ăn ${fmtHM(st.sched)}</small></div>
+        ${st.list.length ? `<span class="meal-count">${st.list.length}</span>` : ''}
+      </div>
+      ${chip ? `<div class="slot-status">${chip}</div>` : ''}
+      ${body}
+    </section>`;
+}
+
+function snackSectionHtml(date, canPost) {
+  const list = nyMeals().filter((m) => m.meal_date === date && (m.meal_type === 'chieu' || m.meal_type === 'khuya'))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (!list.length && !canPost) return '';
+  return `
+    <section class="meal-sec snack" style="--mc: var(--m-chieu)">
+      <div class="meal-head">
+        <span class="meal-ico">🧋</span>
+        <div class="meal-title"><b>Ăn vặt & ăn khuya</b><small>Không tính giờ</small></div>
+        ${list.length ? `<span class="meal-count">${list.length}</span>` : ''}
+      </div>
+      ${list.length
+        ? `<div class="post-row">${list.map((m) => postCard(m, m.meal_type)).join('')}${canPost ? `<button class="add-card" data-new="${mealForTime() === 'khuya' ? 'khuya' : 'chieu'}">${ICONS.plus}</button>` : ''}</div>`
+        : `<div class="empty-note">Chưa có món vặt nào ${canPost ? `· <button class="link-btn" data-new="${mealForTime() === 'khuya' ? 'khuya' : 'chieu'}">thêm</button>` : ''}</div>`}
+    </section>`;
+}
+
 function viewDay() {
   const today = mealDay();
   const date = state.route.date || today;
   const diff = daysBetween(date, today);
-  const canPost = diff >= 0 && diff <= 1;
-  const ps = people();
-  const p2 = partner();
-  if (state.filter !== 'all' && !state.profiles.has(state.filter)) state.filter = 'all';
-
+  const hasNy = !!nyId();
+  const canPost = isNy() && diff >= 0 && diff <= 1;
   const love = loveInfo(state.settings?.start_date);
-  const myStreak = computeStreak(allMeals(), state.uid, today);
-  const p2Streak = p2 ? computeStreak(allMeals(), p2.id, today) : null;
+  const streak = hasNy ? computeStreak(nyMeals(), nyId(), today) : null;
 
-  const pills = date === today ? `
+  let summary = '';
+  if (hasNy) {
+    const sts = MAIN_MEALS.map((k) => slotStatus(date, k));
+    const done = sts.filter((s) => s.state === 'done');
+    const lateSum = done.filter((s) => s.late > 15 && s.late < 12 * 60).reduce((a, s) => a + s.late, 0);
+    const onTime = done.filter((s) => s.late <= 15).length;
+    const red = sts.filter((s) => s.state === 'overdue' || s.state === 'missed').length;
+    summary = `
+      <div class="card sum-card">
+        <span class="sum-av">${esc(ny().avatar)}</span>
+        <div class="sum-main">
+          <b>${esc(nyName())} ${date === today ? 'hôm nay' : relDay(date, today).toLowerCase()}: ${done.length}/3 bữa</b>
+          <small>${onTime ? `✅ ${onTime} đúng giờ` : ''}${lateSum ? ` · ⏰ trễ tổng ${fmtDur(lateSum)}` : ''}${red ? ` · <span class="red-text">🚨 ${red} bữa chưa có hình</span>` : ''}${!onTime && !lateSum && !red ? 'Chưa tới giờ ăn nào' : ''}</small>
+        </div>
+        <span class="sum-dots">${sts.map((s, i) => `<i class="${s.state === 'done' ? s.info.cls : s.state === 'overdue' || s.state === 'missed' ? 'red' : ''}">${MEAL_BY_KEY[MAIN_MEALS[i]].icon}</i>`).join('')}</span>
+      </div>`;
+  }
+
+  const pills = `
     <div class="pills">
+      <a class="pill" href="#/cal/${date.slice(0, 7)}">📅 Cả tháng</a>
       ${love && !love.future ? `<a class="pill love" href="#/us">💞 Bên nhau <b>${love.days}</b> ngày</a>` : ''}
-      <a class="pill streak" href="#/us">🔥 ${esc(me().avatar)} ${myStreak.current}${p2Streak ? ` · ${esc(p2.avatar)} ${p2Streak.current}` : ''} ngày</a>
-    </div>` : '';
-
-  const seg = p2 ? `
-    <div class="seg three" role="tablist">
-      <button class="${state.filter === 'all' ? 'on' : ''}" data-filter="all">Cả hai</button>
-      <button class="${state.filter === state.uid ? 'on' : ''}" data-filter="${state.uid}">${esc(me().avatar)} ${esc(me().display_name)}</button>
-      <button class="${state.filter === p2.id ? 'on' : ''}" data-filter="${p2.id}">${esc(p2.avatar)} ${esc(p2.display_name)}</button>
-    </div>` : '';
-
-  const progress = `
-    <div class="card progress-card">
-      ${ps.map((p) => {
-        const types = new Set(allMeals().filter((m) => m.user_id === p.id && m.meal_date === date).map((m) => m.meal_type));
-        const n = MAIN_MEALS.filter((k) => types.has(k)).length;
-        return `<div class="prog-row">
-          <span class="prog-av">${esc(p.avatar)}</span>
-          <span class="prog-name">${esc(p.display_name)}</span>
-          <span class="prog-dots">${MAIN_MEALS.map((k) => `<i class="${types.has(k) ? 'on' : ''}" title="${MEAL_BY_KEY[k].name}">${MEAL_BY_KEY[k].icon}</i>`).join('')}</span>
-          <span class="prog-n ${n === 3 ? 'full' : ''}">${n === 3 ? 'Đủ bữa 🎉' : `${n}/3`}</span>
-        </div>`;
-      }).join('')}
+      ${streak ? `<a class="pill streak" href="#/us">🔥 Ăn đủ bữa <b>${streak.current}</b> ngày</a>` : ''}
+      ${hasNy ? cyclePill() : ''}
     </div>`;
 
-  const myTypes = new Set(allMeals().filter((m) => m.user_id === state.uid && m.meal_date === date).map((m) => m.meal_type));
-  const yay = date === today && MAIN_MEALS.every((k) => myTypes.has(k)) ? `
-    <div class="card yay">${cat({ size: 58, mood: 'love' })}<div><b>Hôm nay ăn đủ bữa rồi!</b><small>Giỏi quá trời luôn, thưởng một trái tim 💗</small></div></div>` : '';
-
-  const waiting = !p2 ? `
-    <div class="card invite-card">
-      ${cat({ size: 64, mood: 'hungry' })}
-      <div><b>Đang chờ người thương vào app 💌</b>
-      <small>Gửi link app và mã mời cho người ấy để cùng đăng bữa ăn nha.</small>
-      <button class="btn small primary" data-action="copy-link">Sao chép link app</button></div>
-    </div>` : '';
-
-  const sections = MEALS.map((meal) => {
-    const list = mealsOn(date).filter((m) => m.meal_type === meal.key);
-    const iCanAdd = canPost && (state.filter === 'all' || state.filter === state.uid);
-    const cards = list.map(postCard).join('');
-    let body;
-    if (list.length) {
-      body = `<div class="post-row">${cards}${iCanAdd ? `<button class="add-card" data-new="${meal.key}" aria-label="Đăng thêm ${meal.name}">${ICONS.plus}</button>` : ''}</div>`;
-    } else if (iCanAdd) {
-      body = `<button class="empty-card" data-new="${meal.key}">${cat({ size: 46, mood: 'hungry' })}<span><b>Chưa có gì nè</b><small>Chạm để đăng ${meal.name.toLowerCase()}</small></span></button>`;
-    } else {
-      body = `<div class="empty-note">Không có bài nào</div>`;
-    }
-    return `
-      <section class="meal-sec" style="--mc: var(--m-${meal.key})">
-        <div class="meal-head">
-          <span class="meal-ico">${meal.icon}</span>
-          <div class="meal-title"><b>${meal.name}</b><small>${meal.range}</small></div>
-          ${list.length ? `<span class="meal-count">${list.length}</span>` : ''}
-        </div>
-        ${body}
-      </section>`;
-  }).join('');
-
+  const meals = MEALS.filter((m) => MAIN_MEALS.includes(m.key));
   return `
     <div class="day-head">
       <button class="icon-btn" data-day="-1" aria-label="Ngày trước">${ICONS.left}</button>
-      <div class="day-title">
+      <a class="day-title" href="#/cal/${date.slice(0, 7)}" aria-label="Xem cả tháng">
         <div class="day-rel">${relDay(date, today)}</div>
         <div class="day-date">${fmtDayLong(date)}</div>
-      </div>
+      </a>
       <button class="icon-btn" data-day="1" aria-label="Ngày sau" ${date >= today ? 'disabled' : ''}>${ICONS.right}</button>
     </div>
     ${date !== today ? `<div class="back-today"><a href="#/" class="pill">↩ Về hôm nay</a></div>` : ''}
     ${pills}
-    ${waiting}
-    ${seg}
-    ${progress}
-    ${yay}
-    ${sections}
+    ${hasNy ? '' : waitingCard()}
+    ${summary}
+    ${hasNy ? meals.map((m) => slotCardHtml(date, m, canPost)).join('') + snackSectionHtml(date, canPost) : ''}
     <div class="bottom-space"></div>`;
 }
 
@@ -581,62 +648,53 @@ function postCard(m) {
   const isVideo = m.media_type === 'video';
   const thumb = m.thumb_path || (!isVideo ? m.media_path : null);
   return `
-    <button class="post-card" data-open="${m.id}" aria-label="Xem bài của ${esc(nameOf(m.user_id))} lúc ${fmtTime(m.created_at)}">
+    <button class="post-card" data-open="${m.id}" aria-label="Xem bài lúc ${fmtTime(m.created_at)}">
       <span class="ph">${thumb ? `<img data-path="${esc(thumb)}" alt="" loading="lazy">` : `<span class="ph-video">🎬</span>`}</span>
       ${isVideo ? `<span class="pc-play">${ICONS.play}</span>` : ''}
       ${hc || cc ? `<span class="pc-meta">${hc ? `❤️${hc > 1 ? hc : ''}` : ''}${cc ? ` 💬${cc}` : ''}</span>` : ''}
-      <span class="pc-who">${esc(avatarOf(m.user_id))}</span>
       <span class="pc-time">${fmtTime(m.created_at)}</span>
       ${m.mood ? `<span class="pc-mood">${esc(m.mood)}</span>` : ''}
     </button>`;
 }
 
-// ============================================================ NHẬT KÝ (lịch tháng)
+// ------------------------------------------------------------ Lịch tháng (bữa ăn của Ny)
 function viewCalendar() {
   const today = mealDay();
   const month = state.route.month || today.slice(0, 7);
   const first = `${month}-01`;
-  const lead = (weekdayOf(first) + 6) % 7; // bắt đầu từ thứ hai
+  const lead = (weekdayOf(first) + 6) % 7;
   const n = daysInMonth(month);
-  const ps = people();
-  const byDay = new Map();
-  for (const m of allMeals()) {
-    if (!m.meal_date.startsWith(month)) continue;
-    if (!byDay.has(m.meal_date)) byDay.set(m.meal_date, []);
-    byDay.get(m.meal_date).push(m);
-  }
-  const fullSets = new Map(ps.map((p) => [p.id, computeStreak(allMeals(), p.id, today).fullDays]));
-
   let cells = '';
   for (let i = 0; i < lead; i++) cells += `<span class="cell blank"></span>`;
+  let full = 0;
+  let missed = 0;
+  let onTime = 0;
+  let doneCount = 0;
   for (let d = 1; d <= n; d++) {
     const date = `${month}-${String(d).padStart(2, '0')}`;
-    const list = (byDay.get(date) || []).sort((a, b) => a.created_at.localeCompare(b.created_at));
     const future = date > today;
+    const list = nyMealsOn(date);
     const cover = list.find((m) => m.thumb_path || m.media_type === 'image');
-    const dots = ps.map((p) => {
-      const cnt = list.filter((m) => m.user_id === p.id).length;
-      const full = fullSets.get(p.id)?.has(date);
-      return `<i class="${full ? 'full' : cnt ? 'some' : ''}" title="${esc(p.display_name)}"></i>`;
-    }).join('');
+    let dots = '';
+    if (!future && nyId()) {
+      const sts = MAIN_MEALS.map((k) => slotStatus(date, k));
+      dots = sts.filter((s) => s.state !== 'none')
+        .map((s) => `<i class="${s.state === 'done' ? (s.late <= 15 ? 'ok' : 'late') : s.state === 'missed' || s.state === 'overdue' ? 'red' : ''}"></i>`).join('');
+      const done = sts.filter((s) => s.state === 'done');
+      doneCount += done.length;
+      onTime += done.filter((s) => s.late <= 15).length;
+      missed += sts.filter((s) => s.state === 'missed').length;
+      if (done.length === 3) full++;
+    }
     cells += `
       <button class="cell ${date === today ? 'today' : ''} ${cover ? 'has-cover' : ''}" ${future ? 'disabled' : ''} data-goday="${date}">
         ${cover ? `<img data-path="${esc(cover.thumb_path || cover.media_path)}" alt="" loading="lazy">` : ''}
         <span class="num">${d}</span>
-        ${list.length ? `<span class="cnt">${list.length}</span>` : ''}
         <span class="dots">${dots}</span>
       </button>`;
   }
-
-  const monthMeals = allMeals().filter((m) => m.meal_date.startsWith(month));
-  const stats = ps.map((p) => {
-    const mine = monthMeals.filter((m) => m.user_id === p.id);
-    const fullDays = [...(fullSets.get(p.id) || [])].filter((d) => d.startsWith(month)).length;
-    return `<div class="stat"><span class="stat-av">${esc(p.avatar)}</span><div><b>${esc(p.display_name)}</b>
-      <small>${mine.length} bữa · ăn đủ bữa ${fullDays} ngày</small></div></div>`;
-  }).join('');
-
   const nextDisabled = month >= today.slice(0, 7);
+  const rate = doneCount ? Math.round((onTime / doneCount) * 100) : 0;
   return `
     <div class="cal-head">
       <button class="icon-btn" data-month="${addMonths(month, -1)}" aria-label="Tháng trước">${ICONS.left}</button>
@@ -646,17 +704,22 @@ function viewCalendar() {
     <div class="card cal-card">
       <div class="cal-grid wk">${['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'].map((w) => `<span>${w}</span>`).join('')}</div>
       <div class="cal-grid">${cells}</div>
-      <div class="cal-legend"><span><i class="full"></i> ăn đủ 3 bữa chính</span><span><i class="some"></i> có đăng</span></div>
+      <div class="cal-legend"><span><i class="ok"></i> đúng giờ</span><span><i class="late"></i> trễ</span><span><i class="red"></i> bỏ bữa</span></div>
     </div>
-    <div class="card stats-card"><h3>Tháng này</h3>${stats || '<p class="muted">Chưa có ai</p>'}</div>
+    ${nyId() ? `<div class="card stats-card"><h3>${esc(nyName())} tháng này</h3>
+      <div class="stat-grid">
+        <div><b>${full}</b><small>ngày ăn đủ 3 bữa</small></div>
+        <div><b>${rate}%</b><small>bữa đúng giờ</small></div>
+        <div class="${missed ? 'red-text' : ''}"><b>${missed}</b><small>bữa bỏ</small></div>
+      </div></div>` : ''}
     <div class="bottom-space"></div>`;
 }
 
-// ============================================================ HAI ĐỨA
+// ------------------------------------------------------------ Hai đứa
 function viewUs() {
   const today = mealDay();
-  const ps = people();
   const love = loveInfo(state.settings?.start_date);
+  const ps = people();
   let loveCard;
   if (!love) {
     loveCard = `
@@ -670,8 +733,7 @@ function viewUs() {
   } else {
     const avs = ps.map((p) => `<span class="love-av">${esc(p.avatar)}</span>`).join(`<span class="love-heart">💗</span>`);
     let extra = '';
-    if (love.future) extra = `<p>Ngày bắt đầu ở tương lai? Sửa lại trong Cài đặt nha.</p>`;
-    else if (love.todayIsAnniv) extra = `<p class="hl">🎉 Hôm nay là kỷ niệm ${love.yearsNow} năm! Chúc mừng hai đứa 💍</p>`;
+    if (love.todayIsAnniv) extra = `<p class="hl">🎉 Hôm nay là kỷ niệm ${love.yearsNow} năm! Chúc mừng hai đứa 💍</p>`;
     else if (love.isMilestone) extra = `<p class="hl">🎉 Hôm nay tròn ${love.days} ngày! Đi ăn gì ngon đi 🥂</p>`;
     loveCard = `
       <div class="card love-card">
@@ -686,211 +748,258 @@ function viewUs() {
         </div>` : ''}
       </div>`;
   }
-
-  const streaks = ps.map((p) => {
-    const st = computeStreak(allMeals(), p.id, today);
-    const total = allMeals().filter((m) => m.user_id === p.id);
-    const vids = total.filter((m) => m.media_type === 'video').length;
-    const fav = favoriteMeal(total);
-    return `
-      <div class="card streak-card">
-        <div class="sc-top"><span class="sc-av">${esc(p.avatar)}</span><b>${esc(p.display_name)}</b></div>
-        <div class="sc-fire">${ICONS.fire}<span><b>${st.current}</b> ngày</span></div>
-        <small>ăn đủ bữa liên tiếp</small><small>kỷ lục: ${st.best} ngày</small>
-        <div class="sc-today"><span>Hôm nay</span><span class="sc-icons">${MAIN_MEALS.map((k) => `<i class="${st.todayTypes.has(k) ? 'on' : ''}">${MEAL_BY_KEY[k].icon}</i>`).join('')}</span></div>
-        <div class="sc-stats"><span><b>${total.length}</b> bữa</span><span><b>${total.length - vids}</b> ảnh</span><span><b>${vids}</b> video</span></div>
-        ${fav ? `<small class="sc-fav">Hay đăng nhất: ${fav.icon} ${fav.name.toLowerCase()}</small>` : ''}
+  let nyCard = '';
+  if (nyId()) {
+    const st = computeStreak(nyMeals(), nyId(), today);
+    const total = nyMeals();
+    nyCard = `
+      <div class="card streak-card wide">
+        <div class="sc-top"><span class="sc-av">${esc(ny().avatar)}</span><b>${esc(nyName())}</b></div>
+        <div class="sc-fire">${ICONS.fire}<span><b>${st.current}</b> ngày ăn đủ bữa liên tiếp</span></div>
+        <small>kỷ lục: ${st.best} ngày · tổng ${total.length} lần báo cáo</small>
       </div>`;
-  }).join('');
-
-  const loved = allMeals().filter((m) => heartCount(m.id) + commentCount(m.id) > 0)
+  }
+  const loved = nyMeals().filter((m) => heartCount(m.id) + commentCount(m.id) > 0)
     .sort((a, b) => (heartCount(b.id) * 2 + commentCount(b.id)) - (heartCount(a.id) * 2 + commentCount(a.id)) || b.created_at.localeCompare(a.created_at))
     .slice(0, 6);
-
   return `
-    <h2 class="page-title">Hai đứa mình 💞</h2>
+    <h2 class="page-title"><a href="#/" class="back-link">${ICONS.left}</a> Hai đứa mình 💞</h2>
     ${loveCard}
-    <div class="streak-grid">${streaks}</div>
-    ${loved.length ? `<div class="card"><h3>Được thương nhiều nhất 💗</h3><div class="post-row wrap">${loved.map(postCard).join('')}</div></div>` : ''}
-    ${ps.length < 2 ? `<div class="card invite-card">${cat({ size: 60, mood: 'hungry' })}<div><b>Còn thiếu một người nè</b><small>Gửi link app và mã mời cho người thương nha.</small>
-      <button class="btn small primary" data-action="copy-link">Sao chép link app</button></div></div>` : ''}
+    ${nyCard}
+    ${loved.length ? `<div class="card"><h3>Được thương nhiều nhất 💗</h3><div class="post-row wrap">${loved.map((m) => postCard(m)).join('')}</div></div>` : ''}
     <div class="bottom-space"></div>`;
 }
 
-function favoriteMeal(list) {
-  if (!list.length) return null;
-  const count = {};
-  for (const m of list) count[m.meal_type] = (count[m.meal_type] || 0) + 1;
-  const key = Object.entries(count).sort((a, b) => b[1] - a[1])[0][0];
-  return MEAL_BY_KEY[key];
+// ============================================================ CHỊ 🍓
+function nyCycles() {
+  return [...state.cycles.values()].filter((c) => c.user_id === nyId()).sort((a, b) => a.start_date.localeCompare(b.start_date));
 }
 
-// ============================================================ CÀI ĐẶT
-function viewSettings() {
-  const p = me();
-  const s = state.settings || {};
-  const used = allMeals().reduce((n, m) => n + (Number(m.bytes) || 0), 0);
-  const limit = CONFIG.STORAGE_LIMIT_MB * 1024 * 1024;
-  const pct = Math.min(100, Math.round((used / limit) * 100));
-  const t = (v) => (v || '').slice(0, 5);
-  const ios = isIOS();
-  const standalone = isStandalone();
-  const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-  let pushStatus;
-  if (state.pushOn) pushStatus = `<span class="ok-text">Đã bật trên máy này ✅</span>`;
-  else if (ios && !standalone) pushStatus = `<span class="warn-text">iPhone cần thêm app ra màn hình chính trước, rồi mở app từ biểu tượng mèo.</span>`;
-  else if (!pushSupported) pushStatus = `<span class="warn-text">Trình duyệt này chưa hỗ trợ thông báo.</span>`;
-  else if (Notification.permission === 'denied') pushStatus = `<span class="warn-text">Đã chặn thông báo. Vào cài đặt điện thoại → thông báo → cho phép app.</span>`;
-  else pushStatus = `<span class="muted">Chưa bật trên máy này</span>`;
+function cyclePred() {
+  return cyclePredict(nyCycles(), state.settings?.cycle_length || 28, state.settings?.period_length || 5);
+}
 
-  return `
-    <h2 class="page-title">Cài đặt ⚙️</h2>
+function viewCycle() {
+  if (!nyId()) {
+    return `<h2 class="page-title">Chị 🍓</h2>${waitingCard('Khi Ny vào app, hai đứa cùng theo dõi chị 🍓 ở đây: ngày tới, ngày đi, ngày dự kiến và những bản tin vui vui 🍓')}<div class="bottom-space"></div>`;
+  }
+  const today = ymd(new Date());
+  const pred = cyclePred();
+  const st = cycleStatus(pred, today);
+  const N = esc(nyName());
+  const O = esc(ownerName());
+  let hero;
+  if (st.phase === 'nodata') {
+    hero = `
+      <div class="straw-emoji">🍓</div>
+      <h3>Chị 🍓 ghé lần gần nhất ngày nào?</h3>
+      <p>Nhập ngày bắt đầu kỳ gần nhất, mèo sẽ đoán các ngày tiếp theo cho hai đứa.</p>
+      <label class="field inline"><input type="date" id="first-start" max="${today}" value="${today}"></label>
+      <button class="btn primary" data-action="cycle-first">Lưu ngày 🍓</button>`;
+  } else if (st.phase === 'period') {
+    hero = `
+      <div class="straw-emoji wobble">🍓</div>
+      <h3>Chị 🍓 đang ghé thăm</h3>
+      <div class="big-num">Ngày ${st.day}</div>
+      <p>${isNy() ? 'Uống nước ấm, nghỉ ngơi nhiều nha 💗' : `Chế độ chiều chuộng ${N}: BẬT 🫶`}</p>
+      ${st.ongoing ? `<button class="btn primary" data-action="cycle-end">✅ Chị đi rồi</button>` : `<p class="muted small">Đã ghi nhận chị đi ngày ${fmtDmy(pred.last.end_date)}</p>`}`;
+  } else {
+    const big = st.phase === 'late' ? `Trễ ${st.lateBy} ngày` : st.phase === 'due' ? 'Hôm nay' : `Còn ${st.toNext} ngày`;
+    const sub = {
+      late: `Chị 🍓 trễ hẹn rồi. Tới thì bấm báo mèo nha 🐱`,
+      due: `Theo lịch hôm nay chị 🍓 ghé. ${isNy() ? 'Tới thì bấm nút dưới nha' : `${O} nói chuyện nhỏ nhẹ nha 🙏`}`,
+      pms: isNy() ? 'Đang vào mùa dễ nóng tính, được quyền dỗi vô cớ 😤' : `🚨 Mùa nóng tính sắp tới. ${O} nhường nhịn tối đa nha 🧋`,
+      ovulation: 'Hôm nay là ngày rụng trứng (dự đoán) 🥚',
+      fertile: 'Đang trong những ngày dễ thụ thai (dự đoán) 🌸',
+      normal: 'Mọi thứ bình yên, ăn uống đầy đủ nha 🌿',
+    }[st.phase];
+    hero = `
+      <div class="straw-emoji ${st.phase === 'pms' || st.phase === 'due' ? 'wobble' : ''}">${{ pms: '🌋', due: '📅', late: '⏰', ovulation: '🥚', fertile: '🌸' }[st.phase] || '🍓'}</div>
+      <h3>${st.phase === 'late' ? 'Chị 🍓 trễ hẹn' : 'Chị 🍓 ghé lần tới'}</h3>
+      <div class="big-num">${big}</div>
+      <p>Dự kiến ${fmtDmy(pred.nextStart)} · ${sub}</p>
+      <button class="btn primary" data-action="cycle-start">🍓 Chị tới rồi</button>`;
+  }
 
-    <div class="card form-card">
-      <h3>Hồ sơ của mình</h3>
-      <label class="field"><span>Tên gọi</span><input id="my-name" maxlength="40" value="${esc(p.display_name)}"></label>
-      <div class="field"><span>Linh vật</span>
-        <div class="avatar-pick">${AVATARS.map((a) => `<button type="button" class="av-opt ${a === p.avatar ? 'on' : ''}" data-myav="${a}">${a}</button>`).join('')}</div>
-      </div>
-      <button class="btn primary" data-action="save-profile">Lưu hồ sơ</button>
-    </div>
-
-    <div class="card form-card">
-      <h3>Của chung hai đứa</h3>
-      <p class="hint">👑 Chủ app: <b>${esc(nameOf(ownerId()))}</b> (người tạo tài khoản đầu tiên)</p>
-      <label class="field"><span>Tên app</span><input id="app-name" maxlength="40" value="${esc(s.app_name || 'Bé ăn chưa?')}"></label>
-      <label class="field"><span>Ngày bắt đầu yêu 💘</span><input id="start-date" type="date" value="${esc(s.start_date || '')}" max="${mealDay()}"></label>
-      <button class="btn primary" data-action="save-couple">Lưu</button>
-    </div>
-
-    <div class="card form-card">
-      <h3>${ICONS.bell} Thông báo</h3>
-      <p class="hint">Báo khi người kia đăng bữa ăn, thả tim, bình luận và nhắc giờ ăn.</p>
-      <p>${pushStatus}</p>
-      <div class="btn-row">
-        ${!state.pushOn ? `<button class="btn primary" data-action="enable-push" ${(ios && !standalone) || !pushSupported ? 'disabled' : ''}>Bật thông báo</button>` : ''}
-        ${state.pushOn ? `<button class="btn ghost" data-action="test-push">Gửi thử</button>` : ''}
-      </div>
-    </div>
-
-    <div class="card form-card">
-      <h3>⏰ Nhắc giờ ăn</h3>
-      <p class="hint">Tới giờ mà chưa đăng bữa đó thì mèo nhắc qua thông báo và trong mục Tin nhắn, kèm nút gửi báo cáo cho ${esc(nameOf(ownerId()))} 👑.</p>
-      <div class="field"><span>Nhắc ai?</span>
-        <div class="seg two inline-seg">
-          <button type="button" class="${s.remind_targets !== 'both' ? 'on' : ''}" data-remind-target="partner">Chỉ ${esc(nonOwner()?.display_name || 'người yêu')}</button>
-          <button type="button" class="${s.remind_targets === 'both' ? 'on' : ''}" data-remind-target="both">Cả hai</button>
+  let upcoming = '';
+  if (pred) {
+    const nextF = pred.future.find((f) => f.fertileEnd >= today) || pred.future[0];
+    const nextP = pred.future.find((f) => f.start >= today || (st.phase === 'late' && f === pred.future[0])) || pred.future[0];
+    const rows = [
+      { icon: '🌋', label: 'Mùa dễ nóng tính', from: nextP.pmsStart, to: addDays(nextP.start, -1) },
+      { icon: '🍓', label: 'Chị 🍓 dự kiến ghé', from: nextP.start, to: nextP.end },
+      { icon: '🌸', label: 'Ngày dễ thụ thai', from: nextF.fertileStart, to: nextF.fertileEnd },
+      { icon: '🥚', label: 'Ngày rụng trứng', from: nextF.ovulation, to: null },
+    ].sort((a, b) => a.from.localeCompare(b.from));
+    upcoming = `
+      <div class="card">
+        <h3>Sắp tới</h3>
+        <div class="ms-list">
+          ${rows.map((r) => {
+            const dd = daysBetween(today, r.from);
+            const when = dd > 0 ? `còn ${dd} ngày` : dd === 0 ? 'hôm nay' : r.to && r.to >= today ? 'đang diễn ra' : `${-dd} ngày trước`;
+            return `<div class="ms-row"><span class="ms-ico">${r.icon}</span><div><b>${r.label}</b><small>${fmtDmy(r.from).slice(0, 5)}${r.to ? ` – ${fmtDmy(r.to).slice(0, 5)}` : ''}</small></div><span class="ms-when">${when}</span></div>`;
+          }).join('')}
         </div>
+        <p class="hint">Chu kỳ trung bình ${pred.avgCycle} ngày · hành kinh ~${pred.avgPeriod} ngày${pred.samples ? ` (tính từ ${pred.samples} kỳ gần nhất)` : ' (chưa đủ dữ liệu, đang dùng số mặc định)'}.</p>
+      </div>`;
+  }
+
+  // lịch tháng
+  const month = state.cycleMonth || today.slice(0, 7);
+  const lead = (weekdayOf(`${month}-01`) + 6) % 7;
+  let cells = '';
+  for (let i = 0; i < lead; i++) cells += `<span class="cell blank"></span>`;
+  for (let d = 1; d <= daysInMonth(month); d++) {
+    const date = `${month}-${String(d).padStart(2, '0')}`;
+    const kinds = cycleDayKinds(date, pred, today);
+    const icon = kinds.has('ovulation') ? '🥚' : kinds.has('period') ? '🍓' : '';
+    cells += `<button class="ccell ${[...kinds].join(' ')} ${date === today ? 'today' : ''}" data-cycday="${date}"><span>${d}</span>${icon ? `<i>${icon}</i>` : ''}</button>`;
+  }
+  const calendar = `
+    <div class="card cyc-cal">
+      <div class="cal-head inner">
+        <button class="icon-btn" data-cmonth="${addMonths(month, -1)}" aria-label="Tháng trước">${ICONS.left}</button>
+        <h3>${monthTitle(month)}</h3>
+        <button class="icon-btn" data-cmonth="${addMonths(month, 1)}" aria-label="Tháng sau">${ICONS.right}</button>
       </div>
-      <label class="switch-row"><span>Bật nhắc giờ ăn</span>
-        <input type="checkbox" id="rem-on" ${s.reminders_enabled !== false ? 'checked' : ''}><i class="switch"></i></label>
-      <div class="time-grid">
-        <label class="field"><span>🍳 Sáng</span><input type="time" id="rem-sang" value="${t(s.remind_sang) || '09:30'}"></label>
-        <label class="field"><span>🍱 Trưa</span><input type="time" id="rem-trua" value="${t(s.remind_trua) || '13:00'}"></label>
-        <label class="field"><span>🍲 Tối</span><input type="time" id="rem-toi" value="${t(s.remind_toi) || '20:00'}"></label>
+      <div class="cal-grid wk">${['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'].map((w) => `<span>${w}</span>`).join('')}</div>
+      <div class="cal-grid">${cells}</div>
+      <div class="cyc-legend">
+        <span><i class="period"></i>Chị 🍓</span><span><i class="period-pred"></i>Dự kiến</span>
+        <span><i class="fertile"></i>Dễ thụ thai</span><span><i class="ovulation"></i>Rụng trứng</span><span><i class="pms"></i>Dễ nóng tính</span>
       </div>
-      <button class="btn primary" data-action="save-reminders">Lưu giờ nhắc</button>
-    </div>
+      <p class="hint center">Chạm vào một ngày để đánh dấu chị tới / chị đi</p>
+    </div>`;
 
-    <div class="card form-card">
-      <h3>📲 Cài app ra màn hình chính</h3>
-      ${standalone ? `<p class="ok-text">Đang chạy như app rồi nè ✅</p>` : ios ? iosInstallSteps() : `
-        <p class="hint">Trên Android (Chrome): bấm nút dưới, hoặc menu ⋮ → <b>Thêm vào màn hình chính</b>.</p>
-        <button class="btn primary" data-action="install" ${state.installPrompt ? '' : 'disabled'}>Cài app</button>`}
-    </div>
+  const list = nyCycles().slice().reverse();
+  const history = list.length ? `
+    <div class="card">
+      <h3>Lịch sử</h3>
+      ${list.map((c, i) => {
+        const older = list[i + 1];
+        const len = c.end_date ? daysBetween(c.start_date, c.end_date) + 1 : null;
+        const cyc = older ? daysBetween(older.start_date, c.start_date) : null;
+        return `<div class="hist-row"><span>🍓</span><div><b>${fmtDmy(c.start_date)}${c.end_date ? ` → ${fmtDmy(c.end_date).slice(0, 5)}` : ' → đang ghé'}</b>
+          <small>${len ? `${len} ngày` : ''}${len && cyc ? ' · ' : ''}${cyc ? `chu kỳ ${cyc} ngày` : ''}</small></div>
+          <button class="icon-btn small" data-delcycle="${c.id}" aria-label="Xoá">${ICONS.trash}</button></div>`;
+      }).join('')}
+    </div>` : '';
 
+  const s = state.settings || {};
+  const settings = `
     <div class="card form-card">
-      <h3>🎬 Mẹo video</h3>
-      <p class="hint">Video tối đa ${CONFIG.MAX_VIDEO_SEC} giây. iPhone nên vào <b>Cài đặt → Camera → Định dạng → Tương thích nhất</b> để máy Android xem được video.</p>
-    </div>
+      <h3>⚙️ Cài đặt chị 🍓</h3>
+      <div class="num-grid">
+        <label class="field"><span>Chu kỳ mặc định (ngày)</span><input type="number" id="cyc-len" min="18" max="60" value="${s.cycle_length || 28}"></label>
+        <label class="field"><span>Số ngày hành kinh</span><input type="number" id="per-len" min="2" max="12" value="${s.period_length || 5}"></label>
+      </div>
+      <label class="switch-row"><span>Bản tin chị 🍓 cho cả hai (8h sáng)</span>
+        <input type="checkbox" id="cyc-notify" ${s.cycle_notify !== false ? 'checked' : ''}><i class="switch"></i></label>
+      <button class="btn primary" data-action="save-cycle-settings">Lưu</button>
+      <p class="hint">Mèo đoán ngày dựa trên các kỳ đã ghi, chỉ để tham khảo cho vui và nhắc nhau quan tâm, <b>không dùng để tránh thai</b>.</p>
+    </div>`;
 
-    <div class="card form-card">
-      <h3>💾 Dung lượng</h3>
-      <div class="meter"><i style="width:${pct}%"></i></div>
-      <p class="hint">Đã dùng ${fmtBytes(used)} / ${fmtBytes(limit)} miễn phí (${pct}%)</p>
-    </div>
-
-    <div class="card form-card">
-      <button class="btn ghost block danger" data-action="logout">Đăng xuất</button>
-      <p class="hint center">Bé ăn chưa? · phiên bản ${CONFIG.APP_VERSION} · làm bằng 💗</p>
-    </div>
+  return `
+    <h2 class="page-title">Chị 🍓 của ${N}</h2>
+    <div class="card straw-hero phase-${st.phase}">${hero}</div>
+    ${upcoming}
+    ${calendar}
+    ${history}
+    ${settings}
     <div class="bottom-space"></div>`;
 }
 
-function iosInstallSteps() {
-  return `
-    <ol class="steps">
-      <li>Mở link app bằng <b>Safari</b></li>
-      <li>Bấm nút <b>Chia sẻ</b> <span class="inline-ico">${ICONS.share}</span> ở thanh dưới</li>
-      <li>Chọn <b>Thêm vào MH chính</b> (Add to Home Screen)</li>
-      <li>Mở app từ biểu tượng mèo 🐱 rồi bật thông báo</li>
-    </ol>`;
-}
-
-async function refreshPushState() {
-  try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
-    const reg = await navigator.serviceWorker.getRegistration();
-    const sub = await reg?.pushManager.getSubscription();
-    const on = !!sub && Notification.permission === 'granted';
-    if (on) await api.savePushSubscription(sub, state.uid).catch(() => {});
-    if (on !== state.pushOn) {
-      state.pushOn = on;
-      if (state.route.name === 'settings') renderView();
-    }
-  } catch { /* bỏ qua */ }
-}
-
-function b64uToBytes(s) {
-  const pad = '='.repeat((4 - (s.length % 4)) % 4);
-  const b = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
-  return Uint8Array.from(b, (c) => c.charCodeAt(0));
-}
-
-async function enablePush(btn) {
-  if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
-    toast(isIOS() && !isStandalone() ? 'iPhone cần thêm app ra màn hình chính trước nha 📲' : 'Trình duyệt này chưa hỗ trợ thông báo 😿', 'error', 4000);
-    return;
-  }
-  // iOS bắt buộc hỏi quyền ngay trong lần chạm, nên gọi trước mọi thứ khác
-  let perm = 'default';
-  try {
-    perm = await Notification.requestPermission();
-  } catch {
-    perm = Notification.permission;
-  }
-  if (perm !== 'granted') {
-    toast('Chưa được cho phép thông báo 😿', 'error');
-    renderView();
-    return;
-  }
-  btn.disabled = true;
-  btn.classList.add('loading');
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    const { publicKey } = await api.callFunction('vapid');
-    const key = b64uToBytes(publicKey);
-    let sub = await reg.pushManager.getSubscription();
-    if (sub) {
-      const cur = sub.options?.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
-      if (cur && (cur.length !== key.length || cur.some((v, i) => v !== key[i]))) {
-        await sub.unsubscribe();
-        sub = null;
+function openCycleSheet(kind, date) {
+  const today = ymd(new Date());
+  const pred = cyclePred();
+  const last = pred?.last;
+  let title;
+  let options = [];
+  if (kind === 'start') {
+    title = '🍓 Chị tới ngày nào?';
+    options = [0, 1, 2].map((n) => ({ label: n === 0 ? 'Hôm nay' : n === 1 ? 'Hôm qua' : 'Hôm kia', action: 'start', date: addDays(today, -n) }));
+  } else if (kind === 'end') {
+    title = '✅ Chị đi ngày nào?';
+    options = [0, 1, 2].map((n) => ({ label: n === 0 ? 'Hôm nay' : n === 1 ? 'Hôm qua' : 'Hôm kia', action: 'end', date: addDays(today, -n) }))
+      .filter((o) => last && o.date >= last.start_date);
+  } else {
+    title = `Ngày ${fmtDmy(date)}`;
+    const dm = fmtDmy(date).slice(0, 5);
+    const cyc = nyCycles();
+    const inCycle = cyc.find((c) => date >= c.start_date && date <= (c.end_date || addDays(c.start_date, 11)));
+    const soonAfter = cyc.find((c) => c.start_date > date && daysBetween(date, c.start_date) <= 10);
+    if (date > today) {
+      options.push({ label: 'Ngày này chưa tới, chưa đánh dấu được 🙈', action: 'none' });
+    } else if (inCycle) {
+      if (date !== inCycle.start_date) options.push({ label: `✏️ Đổi ngày chị tới thành ${dm}`, action: 'move-start', date, id: inCycle.id });
+      if (inCycle.end_date !== date) {
+        options.push({ label: inCycle.end_date ? `✏️ Đổi ngày chị đi thành ${dm}` : `✅ Chị đi ngày ${dm}`, action: 'end-of', date, id: inCycle.id });
       }
+      options.push({ label: '🗑️ Xoá kỳ này', action: 'delete', id: inCycle.id, danger: true });
+    } else if (soonAfter) {
+      options.push({ label: `✏️ Dời ngày chị tới từ ${fmtDmy(soonAfter.start_date).slice(0, 5)} về ${dm}`, action: 'move-start', date, id: soonAfter.id });
+    } else {
+      options.push({ label: `🍓 Chị tới ngày ${dm}`, action: 'start', date });
     }
-    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-    await api.savePushSubscription(sub, state.uid);
-    state.pushOn = true;
-    toast('Đã bật thông báo trên máy này 🔔');
+  }
+  openOverlay('info', `
+    <div class="sheet cyc-sheet">
+      <div class="grab"></div>
+      <h3>${title}</h3>
+      <div class="opt-list">
+        ${options.map((o) => `<button class="btn ${o.danger ? 'ghost danger' : o.action === 'none' ? 'ghost' : 'primary'} block" data-cyc="${o.action}" data-date="${o.date || ''}" data-id="${o.id || ''}">${o.label}</button>`).join('')}
+        ${kind !== 'day' ? `<label class="field"><span>Hoặc chọn ngày khác</span><input type="date" id="cyc-other" max="${today}"></label>
+          <button class="btn ghost block" data-cyc="${kind}-other">Lưu ngày đã chọn</button>` : ''}
+      </div>
+    </div>`);
+}
+
+async function doCycleAction(action, date, id) {
+  try {
+    const pred = cyclePred();
+    if (action === 'start') {
+      if (nyCycles().some((c) => c.start_date === date)) throw new Error('Ngày này đã được đánh dấu rồi');
+      const prevOpen = pred?.last && !pred.last.end_date && date > pred.last.start_date ? pred.last : null;
+      if (prevOpen && daysBetween(prevOpen.start_date, date) < 12) throw new Error('Kỳ trước chưa kết thúc. Bấm "Chị đi rồi" trước nha');
+      const c = await api.addCycle(nyId(), date);
+      state.cycles.set(c.id, c);
+      hearts(window.innerWidth / 2, window.innerHeight / 2, 12, ['🍓', '💗', '🫶']);
+      toast(isNy() ? 'Mèo ghi sổ rồi, nghỉ ngơi nha 💗' : `Đã ghi chị 🍓 tới cho ${nyName()} 🍓`);
+    } else if (action === 'end' || action === 'end-of') {
+      const target = action === 'end-of' ? state.cycles.get(id) : pred?.last;
+      if (!target) throw new Error('Chưa có kỳ nào để kết thúc');
+      if (date < target.start_date) throw new Error('Ngày chị đi phải sau ngày chị tới');
+      if (daysBetween(target.start_date, date) > 14) throw new Error('Kỳ này dài quá 15 ngày, kiểm tra lại ngày nha');
+      const wasOpen = !target.end_date;
+      const c = await api.updateCycle(target.id, { end_date: date });
+      state.cycles.set(c.id, { ...target, ...c });
+      if (wasOpen) {
+        hearts(window.innerWidth / 2, window.innerHeight / 2, 14, ['🎉', '💗', '✨']);
+        toast('Chị 🍓 về rồi! 🎉');
+      } else toast('Đã sửa ngày ✏️');
+    } else if (action === 'move-start') {
+      const target = state.cycles.get(id);
+      if (!target) throw new Error('Không tìm thấy kỳ này');
+      if (target.end_date && date > target.end_date) throw new Error('Ngày chị tới phải trước ngày chị đi');
+      const c = await api.updateCycle(target.id, { start_date: date });
+      state.cycles.set(c.id, { ...target, ...c });
+      toast('Đã sửa ngày ✏️');
+    } else if (action === 'delete') {
+      if (!confirm('Xoá kỳ này khỏi lịch sử nha?')) return;
+      await api.deleteCycle(id);
+      state.cycles.delete(id);
+      toast('Đã xoá');
+    } else {
+      return;
+    }
+    closeOverlay();
     renderView();
   } catch (e) {
-    toast(`Bật thông báo lỗi: ${e.message}`, 'error', 4000);
-  } finally {
-    btn.disabled = false;
-    btn.classList.remove('loading');
+    const msg = /duplicate|unique/i.test(e.message) ? 'Ngày này đã được đánh dấu rồi' : e.message;
+    toast(msg, 'error', 3800);
   }
 }
-
 
 // ============================================================ TIN NHẮN
 function unreadCount() {
@@ -956,54 +1065,109 @@ function isEmojiOnly(text) {
     /^(\p{Extended_Pictographic}|\p{Emoji_Component}|️|‍|\s)+$/u.test(t);
 }
 
+function mealQuote(mealId) {
+  const meal = state.meals.get(mealId);
+  if (!meal) return `<span class="quote gone">📸 Ảnh bữa ăn đã bị xoá</span>`;
+  const mi = MEAL_BY_KEY[meal.meal_type] || MEALS[0];
+  const thumb = meal.thumb_path || (meal.media_type === 'image' ? meal.media_path : null);
+  return `<span class="quote" data-open="${meal.id}">
+      <span class="q-ph">${thumb ? `<img data-path="${esc(thumb)}" alt="">` : '🎬'}</span>
+      <span class="q-txt"><b>${mi.icon} ${mi.name}</b><small>${fmtTime(meal.created_at)} · ${relDay(meal.meal_date)}</small></span>
+    </span>`;
+}
+
 function reminderHtml(m) {
   const mi = MEAL_BY_KEY[m.meal_type] || MEALS[0];
   const forMe = m.recipient_id === state.uid;
   const who = nameOf(m.recipient_id);
-  const other = [...state.profiles.values()].find((p) => p.id !== m.recipient_id);
   const meal = m.meal_id ? state.meals.get(m.meal_id) : null;
   const diff = m.meal_date ? daysBetween(m.meal_date, mealDay()) : 99;
   const canReport = forMe && !m.meal_id && diff >= 0 && diff <= 1;
+  const urgent = /🚨/.test(m.body || '');
   let action;
   if (m.meal_id) {
     action = `<div class="rc-done">✅ ${forMe ? 'Đã báo cáo' : `${esc(who)} đã báo cáo`}${meal ? ` · <button class="link-btn" data-open="${meal.id}">Xem hình</button>` : ''}</div>`;
   } else if (canReport) {
-    action = `<button class="btn primary rc-btn" data-report="${m.meal_type}|${m.meal_date}">📸 Gửi báo cáo cho ${esc(other?.display_name || 'người thương')}</button>`;
+    action = `<button class="btn primary rc-btn" data-report="${m.meal_type}|${m.meal_date}">📸 Gửi báo cáo cho ${esc(nameOf(ownerId()))}</button>`;
   } else if (forMe) {
     action = `<div class="rc-note">Đã qua giờ báo cáo rồi 🥲</div>`;
+  } else if (diff >= 1) {
+    action = `<div class="rc-note red-text">😿 ${esc(who)} không gửi hình bữa này</div>`;
   } else {
     action = `<div class="rc-note">⏳ Đang chờ ${esc(who)} báo cáo…</div>`;
   }
   return `
-    <div class="remind-card ${m.meal_id ? 'done' : ''}">
+    <div class="remind-card ${m.meal_id ? 'done' : ''} ${urgent && !m.meal_id ? 'urgent' : ''}">
       <div class="rc-top">${cat({ size: 34, mood: m.meal_id ? 'happy' : 'hungry' })}<span>Mèo nhắc ${forMe ? 'bạn' : esc(who)} · ${fmtTime(m.created_at)}</span></div>
       <p>${mi.icon} ${esc(m.body || `Tới giờ ${mi.name.toLowerCase()} rồi nè!`)}</p>
       ${action}
     </div>`;
 }
 
+function cycleCardHtml(m) {
+  let d = null;
+  try { d = JSON.parse(m.body); } catch { /* chữ thường */ }
+  if (!d) return `<div class="cycle-card"><p>${esc(m.body)}</p></div>`;
+  const mine = isNy() ? d.ny : d.owner;
+  const other = isNy() ? d.owner : d.ny;
+  return `
+    <a class="cycle-card" href="#/cycle">
+      <div class="cy-top"><span class="cy-icon">🍓</span><b>${esc(d.title)}</b><time>${fmtTime(m.created_at)}</time></div>
+      <p class="cy-mine">${esc(mine)}</p>
+      <p class="cy-other"><span>${isNy() ? esc(avatarOf(ownerId())) : esc(avatarOf(nyId()))}</span>${esc(other)}</p>
+    </a>`;
+}
+
 function msgHtml(m, grouped) {
   if (m.kind === 'reminder') return reminderHtml(m);
+  if (m.kind === 'cycle') return cycleCardHtml(m);
   const mine = m.sender_id === state.uid;
   const time = fmtTime(m.created_at);
+  if (m.kind === 'heart') {
+    if (!state.hearts.get(m.meal_id)?.has(m.sender_id)) return '';
+    const mi = MEAL_BY_KEY[m.meal_type] || MEALS[0];
+    return `<div class="heart-note" data-open="${m.meal_id}">💗 ${esc(mine ? 'Bạn' : nameOf(m.sender_id))} thả tim ${mi.name.toLowerCase()} ${mi.icon} <time>${time}</time></div>`;
+  }
   const av = mine ? '' : `<span class="msg-av">${grouped ? '' : esc(avatarOf(m.sender_id))}</span>`;
   if (m.kind === 'report') {
     const mi = MEAL_BY_KEY[m.meal_type] || MEALS[0];
     const meal = m.meal_id ? state.meals.get(m.meal_id) : null;
+    if (!meal) return ''; // bài đã bị xoá thì ẩn luôn thẻ báo cáo
     const thumb = meal ? meal.thumb_path || (meal.media_type === 'image' ? meal.media_path : null) : null;
-    const inner = meal
-      ? `<button class="report-card" data-open="${meal.id}">
+    let late = '';
+    const sched = schedMinutes(state.settings, m.meal_type);
+    if (meal && sched != null) {
+      const li = lateInfo(Math.round((new Date(meal.created_at) - schedDate(meal.meal_date, sched)) / 60000));
+      late = `<span class="lt ${li.cls}">${li.icon} ${li.text}</span>`;
+    }
+    const hc = heartCount(meal.id);
+    const cc = commentCount(meal.id);
+    const inner = `<button class="report-card" data-open="${meal.id}">
            <span class="rp-ph">${thumb ? `<img data-path="${esc(thumb)}" alt="">` : '<span class="ph-video">🎬</span>'}${meal.media_type === 'video' ? `<span class="pc-play">${ICONS.play}</span>` : ''}</span>
-           <span class="rp-text"><b>📸 Báo cáo ${mi.name.toLowerCase()} ${mi.icon}</b>${m.body ? `<span class="rp-cap">${esc(m.body)}</span>` : ''}<time>${time}</time></span>
-         </button>`
-      : `<div class="bubble"><i>📸 Bài báo cáo ${mi.name.toLowerCase()} đã bị xoá</i><time>${time}</time></div>`;
+           <span class="rp-text"><b>📸 Báo cáo ${mi.name.toLowerCase()} ${mi.icon}</b>${late}${m.body ? `<span class="rp-cap">${esc(m.body)}</span>` : ''}<time>${time}${hc ? ` · ❤️${hc > 1 ? hc : ''}` : ''}${cc ? ` · 💬${cc}` : ''}</time></span>
+         </button>`;
     return `<div class="msg ${mine ? 'mine' : ''}">${av}${inner}</div>`;
   }
-  const big = isEmojiOnly(m.body);
+  // tin nhắn thường (có thể kèm ảnh/video, hoặc là bình luận một bữa ăn)
+  let media = '';
+  if (m.media_path) {
+    const ratio = m.width && m.height ? Math.max(0.6, Math.min(1.6, m.width / m.height)) : 1;
+    const thumb = m.thumb_path || (m.media_type === 'image' ? m.media_path : null);
+    media = `
+      <button class="msg-media" style="--ar:${ratio}" ${m.pending ? '' : `data-media="${m.id}"`}>
+        ${m.localUrl ? (m.media_type === 'video' ? `<video src="${m.localUrl}" muted playsinline></video>` : `<img src="${m.localUrl}" alt="" class="loaded">`)
+          : thumb ? `<img data-path="${esc(thumb)}" alt="">` : '<span class="ph-video">🎬</span>'}
+        ${m.media_type === 'video' ? `<span class="pc-play">${ICONS.play}</span>` : ''}
+        ${m.pending ? `<span class="up-progress">${Math.round((m.progress || 0) * 100)}%</span>` : ''}
+      </button>`;
+  }
+  const quote = m.meal_id ? mealQuote(m.meal_id) : '';
+  const big = !media && !quote && isEmojiOnly(m.body);
+  const text = m.body ? esc(m.body) : '';
   return `
     <div class="msg ${mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}">
       ${av}
-      <div class="bubble ${big ? 'big-emoji' : ''} ${m.pending ? 'pending' : ''}" ${mine && !m.pending ? `data-bubble="${m.id}"` : ''}>${esc(m.body)}<time>${time}</time></div>
+      <div class="bubble ${big ? 'big-emoji' : ''} ${m.pending ? 'pending' : ''} ${media ? 'has-media' : ''}" ${mine && !m.pending ? `data-bubble="${m.id}"` : ''}>${quote}${media}${text ? `<span class="b-text">${text}</span>` : ''}<time>${time}</time></div>
       ${mine && !m.pending ? `<button class="unsend-btn" data-unsend="${m.id}" hidden>Thu hồi</button>` : ''}
     </div>`;
 }
@@ -1032,31 +1196,86 @@ function viewChat() {
   const empty = `<div class="chat-empty">${cat({ size: 96, mood: 'love' })}<p>Chưa có tin nhắn nào.<br>Nhắn một câu thương thương đi 💌</p></div>`;
   return `
     <div class="chat-head">
-      <button class="icon-btn" data-action="chat-back" aria-label="Về trang chủ">${ICONS.left}</button>
+      <button class="icon-btn" data-action="chat-back" aria-label="Về Lịch ăn">${ICONS.left}</button>
       <span class="chat-av">${esc(p2?.avatar || '💌')}</span>
       <div class="chat-title"><b>${esc(p2?.display_name || 'Đang chờ người thương')}</b>
         <small>${p2 ? 'Chỉ hai đứa mình thấy 🔒' : 'Gửi link app và mã mời cho người ấy nha'}</small></div>
+      <a class="icon-btn head-straw" href="#/cycle" aria-label="Chị 🍓">🍓</a>
     </div>
     <div class="chat-list">${list.length ? html : empty}</div>`;
 }
 
-async function sendChat(text) {
+async function sendChat(text, extra = {}) {
   const body = String(text || '').trim();
-  if (!body) return;
+  if (!body && !extra.media_path) return;
   const tempId = `tmp-${uuid()}`;
   const recipient = partner()?.id || null;
-  state.messages.set(tempId, { id: tempId, sender_id: state.uid, recipient_id: recipient, kind: 'text', body, created_at: new Date().toISOString(), pending: true });
+  state.messages.set(tempId, {
+    id: tempId, sender_id: state.uid, recipient_id: recipient, kind: 'text', body, created_at: new Date().toISOString(), pending: true, ...extra,
+  });
   state.chatStick = true;
-  renderView();
+  if (state.route.name === 'chat') renderView();
+  if (state.overlay?.kind === 'viewer') renderViewer();
   try {
-    const row = await api.sendMessage(body, recipient);
+    const row = await api.sendMessage({ body: body || null, recipient_id: recipient, ...extra });
     state.messages.delete(tempId);
     state.messages.set(row.id, { ...(state.messages.get(row.id) || {}), ...row });
   } catch (e) {
     state.messages.delete(tempId);
     toast(e.message, 'error');
-    const input = document.getElementById('chat-text');
-    if (input && !input.value) input.value = body;
+    if (!extra.media_path) {
+      const input = document.getElementById(extra.meal_id ? 'cmt-input' : 'chat-text');
+      if (input && !input.value) input.value = body;
+    }
+  }
+  state.chatStick = true;
+  scheduleRender();
+}
+
+async function sendChatMedia(file) {
+  let media;
+  const tempId = `tmp-${uuid()}`;
+  try {
+    media = await processFile(file);
+  } catch (e) {
+    toast(e.message, 'error', 4200);
+    return;
+  }
+  const recipient = partner()?.id || null;
+  const temp = {
+    id: tempId, sender_id: state.uid, recipient_id: recipient, kind: 'text', body: null, created_at: new Date().toISOString(),
+    pending: true, progress: 0, media_type: media.kind, media_path: 'pending', localUrl: media.previewUrl, width: media.width, height: media.height,
+  };
+  state.messages.set(tempId, temp);
+  state.chatStick = true;
+  renderView();
+  const id = uuid();
+  const now = new Date();
+  const folder = `${state.uid}/chat/${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const ext = media.kind === 'video' ? (media.contentType.includes('webm') ? 'webm' : 'mp4') : 'jpg';
+  const mediaPath = `${folder}/${id}.${ext}`;
+  const thumbPath = media.thumb ? `${folder}/${id}_t.jpg` : null;
+  const total = media.main.size + (media.thumb?.size || 0);
+  try {
+    await api.upload(mediaPath, media.main, media.contentType, (f) => {
+      temp.progress = (f * media.main.size) / total;
+      const el = document.querySelector('.up-progress');
+      if (el) el.textContent = `${Math.round(temp.progress * 100)}%`;
+    });
+    if (thumbPath) await api.upload(thumbPath, media.thumb, 'image/jpeg');
+    const row = await api.sendMessage({
+      body: null, recipient_id: recipient, media_type: media.kind, media_path: mediaPath, thumb_path: thumbPath,
+      width: media.width, height: media.height, duration: media.duration, bytes: total,
+    });
+    state.messages.delete(tempId);
+    // giữ ảnh đã nén trong máy để khỏi tải lại ngay sau khi gửi
+    state.messages.set(row.id, { ...(state.messages.get(row.id) || {}), ...row, localUrl: media.kind === 'image' ? media.previewUrl : undefined });
+    if (media.kind !== 'image') URL.revokeObjectURL(media.previewUrl);
+  } catch (e) {
+    state.messages.delete(tempId);
+    toast(e.message, 'error', 4200);
+    api.removeFiles([mediaPath, thumbPath]).catch(() => {});
+    if (media.previewUrl) URL.revokeObjectURL(media.previewUrl);
   }
   state.chatStick = true;
   scheduleRender();
@@ -1078,11 +1297,170 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', onViewport);
 }
 
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.uid) markChatRead();
-});
+// ============================================================ CÀI ĐẶT
+function viewSettings() {
+  const p = me();
+  const s = state.settings || {};
+  const used = allMeals().reduce((n, m) => n + (Number(m.bytes) || 0), 0) +
+    [...state.messages.values()].reduce((n, m) => n + (Number(m.bytes) || 0), 0);
+  const limit = CONFIG.STORAGE_LIMIT_MB * 1024 * 1024;
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const t = (v, d) => (v || d).slice(0, 5);
+  const ios = isIOS();
+  const standalone = isStandalone();
+  const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  let pushStatus;
+  if (state.pushOn) pushStatus = `<span class="ok-text">Đã bật trên máy này ✅</span>`;
+  else if (ios && !standalone) pushStatus = `<span class="warn-text">iPhone cần thêm app ra màn hình chính trước, rồi mở app từ biểu tượng mèo.</span>`;
+  else if (!pushSupported) pushStatus = `<span class="warn-text">Trình duyệt này chưa hỗ trợ thông báo.</span>`;
+  else if (Notification.permission === 'denied') pushStatus = `<span class="warn-text">Đã chặn thông báo. Vào cài đặt điện thoại → thông báo → cho phép app.</span>`;
+  else pushStatus = `<span class="muted">Chưa bật trên máy này</span>`;
 
-// ============================================================ lớp phủ (đăng bài / xem bài / sheet)
+  return `
+    <h2 class="page-title"><a href="#/" class="back-link">${ICONS.left}</a> Cài đặt ⚙️</h2>
+
+    <div class="card form-card">
+      <h3>Hồ sơ của mình</h3>
+      <label class="field"><span>Tên gọi</span><input id="my-name" maxlength="40" value="${esc(p.display_name)}"></label>
+      <div class="field"><span>Linh vật</span>
+        <div class="avatar-pick">${AVATARS.map((a) => `<button type="button" class="av-opt ${a === p.avatar ? 'on' : ''}" data-myav="${a}">${a}</button>`).join('')}</div>
+      </div>
+      <button class="btn primary" data-action="save-profile">Lưu hồ sơ</button>
+    </div>
+
+    <div class="card form-card">
+      <h3>⏰ Giờ ăn của ${esc(nyName())}</h3>
+      <p class="hint">Quá giờ 15 phút chưa có hình, mèo nhắc ${esc(nyName())} trong Tin nhắn. Trễ 1 tiếng mèo nhắc lần nữa${s.late_alert_owner !== false ? ` và báo cho ${esc(ownerName())}` : ''}.</p>
+      <div class="time-grid">
+        <label class="field"><span>🍳 Sáng</span><input type="time" id="sch-sang" value="${t(s.sched_sang, '07:30')}"></label>
+        <label class="field"><span>🍱 Trưa</span><input type="time" id="sch-trua" value="${t(s.sched_trua, '12:00')}"></label>
+        <label class="field"><span>🍲 Tối</span><input type="time" id="sch-toi" value="${t(s.sched_toi, '19:00')}"></label>
+      </div>
+      <label class="switch-row"><span>Mèo nhắc ${esc(nyName())} khi trễ bữa</span>
+        <input type="checkbox" id="rem-on" ${s.reminders_enabled !== false ? 'checked' : ''}><i class="switch"></i></label>
+      <label class="switch-row"><span>Báo ${esc(ownerName())} khi ${esc(nyName())} trễ 1 tiếng</span>
+        <input type="checkbox" id="late-owner" ${s.late_alert_owner !== false ? 'checked' : ''}><i class="switch"></i></label>
+      <button class="btn primary" data-action="save-schedule">Lưu giờ ăn</button>
+    </div>
+
+    <div class="card form-card">
+      <h3>Của chung hai đứa</h3>
+      <p class="hint">👑 Chủ app: <b>${esc(ownerName())}</b> · 🐷 Ny: <b>${esc(nyId() ? nyName() : 'chưa vào app')}</b></p>
+      <label class="field"><span>Tên app</span><input id="app-name" maxlength="40" value="${esc(s.app_name || 'Bé ăn chưa?')}"></label>
+      <label class="field"><span>Ngày bắt đầu yêu 💘</span><input id="start-date" type="date" value="${esc(s.start_date || '')}" max="${mealDay()}"></label>
+      <button class="btn primary" data-action="save-couple">Lưu</button>
+      <a class="btn ghost block love-link" href="#/us">💞 Xem trang Hai đứa mình</a>
+    </div>
+
+    <div class="card form-card">
+      <h3>${ICONS.bell} Thông báo</h3>
+      <p class="hint">Tin nhắn mới, giờ ăn, bản tin chị 🍓.</p>
+      <p>${pushStatus}</p>
+      <div class="btn-row">
+        ${!state.pushOn ? `<button class="btn primary" data-action="enable-push" ${(ios && !standalone) || !pushSupported ? 'disabled' : ''}>Bật thông báo</button>` : ''}
+        ${state.pushOn ? `<button class="btn ghost" data-action="test-push">Gửi thử</button>` : ''}
+      </div>
+    </div>
+
+    <div class="card form-card">
+      <h3>📲 Cài app ra màn hình chính</h3>
+      ${standalone ? `<p class="ok-text">Đang chạy như app rồi nè ✅</p>` : ios ? iosInstallSteps() : `
+        <p class="hint">Trên Android (Chrome): bấm nút dưới, hoặc menu ⋮ → <b>Thêm vào màn hình chính</b>.</p>
+        <button class="btn primary" data-action="install" ${state.installPrompt ? '' : 'disabled'}>Cài app</button>`}
+    </div>
+
+    <div class="card form-card">
+      <h3>🎬 Mẹo video</h3>
+      <p class="hint">Video tối đa ${CONFIG.MAX_VIDEO_SEC} giây. iPhone nên vào <b>Cài đặt → Camera → Định dạng → Tương thích nhất</b> để máy Android xem được video.</p>
+    </div>
+
+    <div class="card form-card">
+      <h3>💾 Dung lượng</h3>
+      <div class="meter"><i style="width:${pct}%"></i></div>
+      <p class="hint">Đã dùng ${fmtBytes(used)} / ${fmtBytes(limit)} miễn phí (${pct}%)</p>
+    </div>
+
+    <div class="card form-card">
+      <button class="btn ghost block danger" data-action="logout">Đăng xuất</button>
+      <p class="hint center">Bé ăn chưa? · phiên bản ${CONFIG.APP_VERSION} · làm bằng 💗</p>
+    </div>
+    <div class="bottom-space"></div>`;
+}
+
+function iosInstallSteps() {
+  return `
+    <ol class="steps">
+      <li>Mở link app bằng <b>Safari</b></li>
+      <li>Bấm nút <b>Chia sẻ</b> <span class="inline-ico">${ICONS.share}</span> ở thanh dưới</li>
+      <li>Chọn <b>Thêm vào MH chính</b> (Add to Home Screen)</li>
+      <li>Mở app từ biểu tượng mèo 🐱 rồi bật thông báo</li>
+    </ol>`;
+}
+
+async function refreshPushState() {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = await reg?.pushManager.getSubscription();
+    const on = !!sub && Notification.permission === 'granted';
+    if (on) await api.savePushSubscription(sub, state.uid).catch(() => {});
+    if (on !== state.pushOn) {
+      state.pushOn = on;
+      if (state.route.name === 'settings') renderView();
+    }
+  } catch { /* bỏ qua */ }
+}
+
+function b64uToBytes(s) {
+  const pad = '='.repeat((4 - (s.length % 4)) % 4);
+  const b = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(b, (c) => c.charCodeAt(0));
+}
+
+async function enablePush(btn) {
+  if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+    toast(isIOS() && !isStandalone() ? 'iPhone cần thêm app ra màn hình chính trước nha 📲' : 'Trình duyệt này chưa hỗ trợ thông báo 😿', 'error', 4000);
+    return;
+  }
+  let perm = 'default';
+  try {
+    perm = await Notification.requestPermission(); // iOS: phải hỏi ngay trong lần chạm
+  } catch {
+    perm = Notification.permission;
+  }
+  if (perm !== 'granted') {
+    toast('Chưa được cho phép thông báo 😿', 'error');
+    renderView();
+    return;
+  }
+  btn.disabled = true;
+  btn.classList.add('loading');
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const { publicKey } = await api.callFunction('vapid');
+    const key = b64uToBytes(publicKey);
+    let sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      const cur = sub.options?.applicationServerKey ? new Uint8Array(sub.options.applicationServerKey) : null;
+      if (cur && (cur.length !== key.length || cur.some((v, i) => v !== key[i]))) {
+        await sub.unsubscribe();
+        sub = null;
+      }
+    }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    await api.savePushSubscription(sub, state.uid);
+    state.pushOn = true;
+    toast('Đã bật thông báo trên máy này 🔔');
+    renderView();
+  } catch (e) {
+    toast(`Bật thông báo lỗi: ${e.message}`, 'error', 4000);
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+  }
+}
+
+// ============================================================ lớp phủ
 function overlayRoot() {
   return document.getElementById('overlays');
 }
@@ -1109,37 +1487,45 @@ function closeOverlayDom() {
   }, 260);
 }
 
-/** Đóng lớp phủ: nếu đã thêm vào lịch sử thì lùi lại (nút Back của Android cũng hoạt động) */
+function baseHash() {
+  const r = state.route;
+  if (r.name === 'cal') return `#/cal${r.month ? '/' + r.month : ''}`;
+  if (['us', 'settings', 'chat', 'cycle'].includes(r.name)) return `#/${r.name}`;
+  return r.date ? `#/day/${r.date}` : '#/';
+}
+
 function closeOverlay() {
   const ov = state.overlay;
   if (!ov) return;
   if (ov.pushed) {
     history.back();
   } else {
-    const r = state.route;
-    const base = r.name === 'cal' ? `#/cal${r.month ? '/' + r.month : ''}` : r.name === 'us' ? '#/us' : r.name === 'settings' ? '#/settings' : r.date ? `#/day/${r.date}` : '#/';
-    if (/^#\/(p|new)\b/.test(location.hash)) history.replaceState(null, '', base);
+    if (/^#\/(p|new|m)\b/.test(location.hash)) history.replaceState(null, '', baseHash());
     closeOverlayDom();
   }
 }
 
 function navOverlay(hash) {
-  // mở lớp phủ có thêm vào lịch sử
   state.pendingPush = true;
   location.hash = hash;
 }
 
-// ------------------------------------------------------------ Đăng bữa
+// ------------------------------------------------------------ Báo cáo bữa ăn (chỉ Ny)
 function openComposer(mealKey, date) {
   const pushed = !!state.pendingPush;
   state.pendingPush = false;
   if (state.overlay?.kind === 'composer') return;
+  if (!isNy()) {
+    if (pushed) history.back();
+    else history.replaceState(null, '', baseHash());
+    toast(`Chỉ ${nyName()} báo cáo bữa ăn thôi nha 🐱`);
+    return;
+  }
   const today = mealDay();
-  const report = !!date && state.route.name === 'chat';
   state.composer = {
     meal: mealKey || mealForTime(),
     day: date && date === addDays(today, -1) ? 'yesterday' : 'today',
-    reportTo: report ? partner()?.id || null : null,
+    fromChat: state.route.name === 'chat',
     media: null,
     processing: false,
     caption: '',
@@ -1154,6 +1540,7 @@ function composerHtml() {
   const c = state.composer;
   const today = mealDay();
   const yesterday = addDays(today, -1);
+  const sched = schedMinutes(state.settings, c.meal);
   let mediaBlock;
   if (c.processing) {
     mediaBlock = `<div class="pick-zone busy">${cat({ size: 70, mood: 'happy', cls: 'bounce' })}<p>Mèo đang nén ảnh cho nhẹ…</p></div>`;
@@ -1179,11 +1566,11 @@ function composerHtml() {
     <div class="sheet composer-sheet">
       <div class="grab"></div>
       <div class="sheet-head">
-        <h3>${c.reportTo ? `Báo cáo cho ${esc(nameOf(c.reportTo))} 📸` : `Đăng bữa ăn ${MEAL_BY_KEY[c.meal].icon}`}</h3>
+        <h3>Báo cáo cho ${esc(ownerName())} 📸</h3>
         <button class="icon-btn" data-action="close-overlay" aria-label="Đóng">${ICONS.close}</button>
       </div>
       ${mediaBlock}
-      <div class="field"><span>Bữa nào nè?</span>
+      <div class="field"><span>Bữa nào nè?${sched != null ? ` <em class="sched-hint">giờ ăn ${fmtHM(sched)}</em>` : ''}</span>
         <div class="chips">${MEALS.map((m) => `<button type="button" class="chip ${c.meal === m.key ? 'on' : ''}" data-cmeal="${m.key}">${m.icon} ${m.short}</button>`).join('')}</div>
       </div>
       <div class="field"><span>Ngày</span>
@@ -1199,7 +1586,7 @@ function composerHtml() {
       </div>
       ${c.busy ? `<div class="upload-bar"><i style="width:${Math.round(c.progress * 100)}%"></i></div>` : ''}
       <button class="btn primary block big-btn" data-action="submit-meal" ${!c.media || c.busy || c.processing ? 'disabled' : ''}>
-        ${c.busy ? `Đang gửi… ${Math.round(c.progress * 100)}%` : c.reportTo ? 'Gửi báo cáo 📸' : 'Đăng nè 💌'}
+        ${c.busy ? `Đang gửi… ${Math.round(c.progress * 100)}%` : 'Gửi báo cáo 📸'}
       </button>
     </div>`;
 }
@@ -1248,6 +1635,8 @@ async function submitMeal() {
   const mediaPath = `${folder}/${id}.${ext}`;
   const thumbPath = c.media.thumb ? `${folder}/${id}_t.jpg` : null;
   const total = c.media.main.size + (c.media.thumb?.size || 0);
+  const mealDateBefore = c.day === 'yesterday' ? addDays(mealDay(), -1) : mealDay();
+  const before = MAIN_MEALS.filter((k) => nyMealsOn(mealDateBefore, k).length).length;
   try {
     await api.upload(mediaPath, c.media.main, c.media.contentType, (f) => {
       c.progress = (f * c.media.main.size) / total;
@@ -1274,30 +1663,21 @@ async function submitMeal() {
       mood: c.mood,
     });
     state.meals.set(row.id, row);
-    const before = MAIN_MEALS.filter((k) => allMeals().some((m) => m.user_id === state.uid && m.meal_date === mealDate && m.meal_type === k && m.id !== row.id)).length;
-    const after = MAIN_MEALS.filter((k) => allMeals().some((m) => m.user_id === state.uid && m.meal_date === mealDate && m.meal_type === k)).length;
     if (c.media.previewUrl) URL.revokeObjectURL(c.media.previewUrl);
+    const sched = schedMinutes(state.settings, c.meal);
+    const li = sched != null ? lateInfo(Math.round((new Date(row.created_at) - schedDate(mealDate, sched)) / 60000)) : null;
+    const after = MAIN_MEALS.filter((k) => nyMealsOn(mealDate, k).length).length;
     closeOverlay();
-    if (c.reportTo) {
-      // báo cáo từ khung chat: ở lại khung chat, tin báo cáo sẽ hiện ngay
-      setTimeout(() => {
-        hearts(window.innerWidth / 2, window.innerHeight * 0.6, 14, ['📸', '💗', '🍚', '🐾']);
-        toast(`Đã gửi báo cáo cho ${nameOf(c.reportTo)} 📸`);
-        state.chatStick = true;
-        scheduleRender();
-      }, 120);
-      return;
-    }
-    const target = mealDate === mealDay() ? '#/' : `#/day/${mealDate}`;
     setTimeout(() => {
-      if (location.hash !== target && !(target === '#/' && (location.hash === '' || location.hash === '#/'))) location.hash = target;
-      else renderView();
-      if (after === 3 && before < 3) {
+      if (!c.fromChat && mealDate !== (state.route.date || mealDay())) location.hash = mealDate === mealDay() ? '#/' : `#/day/${mealDate}`;
+      state.chatStick = c.fromChat;
+      scheduleRender();
+      if (before < 3 && after === 3) {
         hearts(window.innerWidth / 2, window.innerHeight * 0.55, 26, ['🎉', '💗', '🍚', '✨', '🐾']);
         toast('Ăn đủ 3 bữa rồi, giỏi quá trời! 🎉', 'ok', 3600);
       } else {
-        hearts(window.innerWidth / 2, window.innerHeight * 0.6, 12);
-        toast('Đăng rồi nè! 🐱');
+        hearts(window.innerWidth / 2, window.innerHeight * 0.6, 12, ['📸', '💗', '🍚', '🐾']);
+        toast(`Đã báo cáo cho ${ownerName()}${li ? ` · ${li.text.toLowerCase()}` : ''} 📸`);
       }
     }, 120);
   } catch (e) {
@@ -1308,8 +1688,8 @@ async function submitMeal() {
   }
 }
 
-// ------------------------------------------------------------ Xem bài
-function openViewer(id, _fromRoute) {
+// ------------------------------------------------------------ Xem ảnh bữa ăn
+function openViewer(id) {
   const pushed = !!state.pendingPush;
   state.pendingPush = false;
   state.viewerDraft = '';
@@ -1333,8 +1713,10 @@ function renderViewer() {
   const mine = m.user_id === state.uid;
   const hs = state.hearts.get(m.id) || new Map();
   const iHeart = hs.has(state.uid);
-  const cmts = state.comments.get(m.id) || [];
+  const cmts = mealComments(m.id);
   const meal = MEAL_BY_KEY[m.meal_type];
+  const sched = schedMinutes(state.settings, m.meal_type);
+  const li = sched != null ? lateInfo(Math.round((new Date(m.created_at) - schedDate(m.meal_date, sched)) / 60000)) : null;
   const existingMedia = body.querySelector('.v-media');
   const sameMedia = existingMedia && existingMedia.dataset.mid === m.id;
 
@@ -1346,6 +1728,7 @@ function renderViewer() {
   const whoHearted = [...hs.keys()].map((u) => `${esc(avatarOf(u))} ${esc(nameOf(u))}`).join(', ');
   const restHtml = `
     <div class="v-body">
+      ${li ? `<div class="v-late"><span class="lt ${li.cls}">${li.icon} ${li.text}</span><small>Giờ ăn ${fmtHM(sched)} · gửi lúc ${fmtTime(m.created_at)}</small></div>` : ''}
       ${m.caption || m.mood ? `<p class="v-caption">${m.mood ? `<span class="v-mood">${esc(m.mood)}</span>` : ''}${esc(m.caption || '')}</p>` : ''}
       <div class="v-actions">
         <button class="heart-btn ${iHeart ? 'on' : ''}" data-action="toggle-heart" aria-pressed="${iHeart}">${iHeart ? ICONS.heartFill : ICONS.heart}<span>${hs.size || ''}</span></button>
@@ -1353,11 +1736,10 @@ function renderViewer() {
       </div>
       <div class="comments">
         ${cmts.map((c) => `
-          <div class="cmt ${c.user_id === state.uid ? 'mine' : ''}">
-            <span class="cmt-av">${esc(avatarOf(c.user_id))}</span>
-            <div class="cmt-bubble"><b>${esc(nameOf(c.user_id))}</b><p>${esc(c.body)}</p><small>${timeAgo(c.created_at)}</small></div>
-            ${c.user_id === state.uid ? `<button class="cmt-del" data-delcmt="${c.id}" aria-label="Xoá bình luận">${ICONS.trash}</button>` : ''}
-          </div>`).join('') || `<p class="muted small-note">Chưa có bình luận. Khen một câu đi nè 😚</p>`}
+          <div class="cmt ${c.sender_id === state.uid ? 'mine' : ''}">
+            <span class="cmt-av">${esc(avatarOf(c.sender_id))}</span>
+            <div class="cmt-bubble"><b>${esc(nameOf(c.sender_id))}</b><p>${esc(c.body || '')}</p><small>${c.pending ? 'đang gửi…' : timeAgo(c.created_at)}</small></div>
+          </div>`).join('') || `<p class="muted small-note">Bình luận ở đây sẽ hiện cả trong Tin nhắn 💬</p>`}
       </div>
       <form class="cmt-form" id="cmt-form">
         <input id="cmt-input" maxlength="1000" placeholder="${mine ? 'Viết gì đó…' : 'Khen một câu đi 😚'}" autocomplete="off" enterkeyhint="send">
@@ -1378,10 +1760,10 @@ function renderViewer() {
   if (sameMedia) {
     body.querySelector('.v-head').outerHTML = headHtml;
     body.querySelector('.v-body').outerHTML = restHtml;
+    hydrateMedia(body);
   } else {
     body.innerHTML = `${headHtml}<div class="v-media" data-mid="${m.id}">${mediaHtml}</div>${restHtml}`;
-    const vid = body.querySelector('video');
-    vid?.addEventListener('error', () => body.querySelector('.v-error')?.removeAttribute('hidden'));
+    body.querySelector('video')?.addEventListener('error', () => body.querySelector('.v-error')?.removeAttribute('hidden'));
     hydrateMedia(body);
   }
   const newInput = document.getElementById('cmt-input');
@@ -1425,28 +1807,6 @@ async function toggleHeart(evt) {
   scheduleRender();
 }
 
-async function sendComment(form) {
-  const input = form.querySelector('input');
-  const text = input.value.trim();
-  const id = state.overlay?.id;
-  if (!text || !id) return;
-  input.value = '';
-  state.viewerDraft = '';
-  const btn = form.querySelector('button');
-  btn.disabled = true;
-  try {
-    const c = await api.addComment(id, text);
-    addCommentState(c);
-    renderViewer();
-    document.querySelector('.comments .cmt:last-child')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  } catch (e) {
-    input.value = text;
-    toast(e.message, 'error');
-  } finally {
-    btn.disabled = false;
-  }
-}
-
 async function deleteMeal() {
   const m = state.meals.get(state.overlay?.id);
   if (!m || m.user_id !== state.uid) return;
@@ -1462,31 +1822,55 @@ async function deleteMeal() {
   }
 }
 
+// ------------------------------------------------------------ Xem ảnh/video trong chat
+function openMediaViewer(msgId) {
+  const pushed = !!state.pendingPush;
+  state.pendingPush = false;
+  const m = state.messages.get(msgId);
+  if (!m?.media_path) {
+    if (!pushed) history.replaceState(null, '', baseHash());
+    return;
+  }
+  const inner = m.media_type === 'video'
+    ? `<video data-path="${esc(m.media_path)}" ${m.thumb_path ? `data-poster="${esc(m.thumb_path)}"` : ''} controls playsinline autoplay></video>`
+    : `<img data-path="${esc(m.media_path)}" alt="">`;
+  openOverlay('media', `
+    <div class="media-full">
+      <button class="icon-btn mf-close" data-action="close-overlay" aria-label="Đóng">${ICONS.close}</button>
+      ${inner}
+      <p class="mf-cap">${esc(avatarOf(m.sender_id))} ${esc(nameOf(m.sender_id))} · ${fmtTime(m.created_at)} ${relDay(ymd(new Date(m.created_at)), ymd(new Date())).toLowerCase()}</p>
+    </div>`, { pushed, id: msgId });
+  hydrateMedia(overlayRoot());
+}
+
 // ------------------------------------------------------------ Chào mừng lần đầu
 function maybeWelcome() {
-  const key = `bac-welcome-${state.uid}`;
+  const key = `bac-welcome2-${state.uid}`;
   try {
     if (localStorage.getItem(key)) return;
     localStorage.setItem(key, '1');
   } catch {
     return;
   }
-  if (/^#\/(p|new)\//.test(location.hash)) return;
+  if (/^#\/(p|new|m)\//.test(location.hash)) return;
   const ios = isIOS();
   const standalone = isStandalone();
   const install = standalone ? '' : ios ? `<h4>1. Thêm app ra màn hình chính</h4>${iosInstallSteps()}` : isAndroid()
     ? `<h4>1. Cài app ra màn hình chính</h4><p class="hint">Chrome: menu ⋮ → <b>Thêm vào màn hình chính</b>, hoặc bấm nút dưới.</p>
        <button class="btn ghost" data-action="install" ${state.installPrompt ? '' : 'disabled'}>Cài app</button>`
     : '';
+  const intro = isNy()
+    ? `Mỗi bữa nhớ chụp hình báo cáo cho ${esc(ownerName())} nha. Trễ giờ là mèo nhắc đó 😼`
+    : `Ở đây anh xem ${esc(nyName())} ăn uống có đúng giờ không, nhắn tin và theo dõi chị 🍓.`;
   openOverlay('info', `
     <div class="sheet welcome-sheet">
       <div class="grab"></div>
       <div class="center">${cat({ size: 100, mood: 'love', bowl: true })}</div>
       <h3 class="center">Chào ${esc(me().display_name)}! 🐾</h3>
-      <p class="center muted">Mỗi bữa ăn chụp một tấm cho người thương xem nha.</p>
+      <p class="center muted">${intro}</p>
       ${install}
       <h4>${install ? '2' : '1'}. Bật thông báo</h4>
-      <p class="hint">Để biết khi người ấy đăng bữa ăn và được nhắc giờ ăn. ${ios && !standalone ? 'Trên iPhone cần làm bước 1 trước, rồi bấm hình đại diện ở góc trên → Cài đặt để bật.' : ''}</p>
+      <p class="hint">Để nhận tin nhắn, nhắc giờ ăn và bản tin chị 🍓. ${ios && !standalone ? 'Trên iPhone cần làm bước 1 trước, rồi bấm hình đại diện ở góc trên → Cài đặt để bật.' : ''}</p>
       <div class="btn-row">
         ${!(ios && !standalone) ? `<button class="btn ghost" data-action="enable-push">Bật thông báo</button>` : ''}
         <button class="btn primary" data-action="close-overlay">Bắt đầu thôi 💕</button>
@@ -1496,9 +1880,21 @@ function maybeWelcome() {
 
 // ============================================================ sự kiện
 document.addEventListener('click', async (e) => {
-  const t = e.target.closest('button, a, [data-action], label, [data-bubble]');
+  const menu = document.getElementById('attach-menu');
+  if (menu && !menu.hidden && !e.target.closest('#attach-menu, [data-action=attach]')) menu.hidden = true;
+
+  const t = e.target.closest('button, a, [data-action], label, [data-bubble], [data-open], [data-media]');
   if (!t) return;
 
+  if (t.dataset.authMode) return showAuth(t.dataset.authMode);
+  if (t.classList.contains('av-opt') && t.closest('.avatar-pick')) {
+    t.closest('.avatar-pick').querySelectorAll('.av-opt').forEach((b) => b.classList.toggle('on', b === t));
+    return;
+  }
+  if (t.dataset.media) {
+    navOverlay(`#/m/${t.dataset.media}`);
+    return;
+  }
   if (t.dataset.bubble) {
     const b = document.querySelector(`[data-unsend="${t.dataset.bubble}"]`);
     if (b) b.hidden = !b.hidden;
@@ -1506,9 +1902,11 @@ document.addEventListener('click', async (e) => {
   }
   if (t.dataset.unsend) {
     if (!confirm('Thu hồi tin nhắn này nha?')) return;
+    const msg = state.messages.get(t.dataset.unsend);
     try {
       await api.deleteMessage(t.dataset.unsend);
       state.messages.delete(t.dataset.unsend);
+      if (msg?.media_path) api.removeFiles([msg.media_path, msg.thumb_path]).catch(() => {});
       renderView();
     } catch (err) {
       toast(err.message, 'error');
@@ -1524,31 +1922,36 @@ document.addEventListener('click', async (e) => {
     navOverlay(`#/new/${meal}/${date}`);
     return;
   }
-  if (t.dataset.remindTarget) {
-    t.closest('.seg').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === t));
-    return;
-  }
-
-  if (t.dataset.authMode) return showAuth(t.dataset.authMode);
-  if (t.classList.contains('av-opt') && t.closest('.avatar-pick')) {
-    t.closest('.avatar-pick').querySelectorAll('.av-opt').forEach((b) => b.classList.toggle('on', b === t));
-    return;
-  }
-  if (t.dataset.filter) {
-    state.filter = t.dataset.filter;
-    renderView();
-    return;
-  }
   if (t.dataset.day) {
     const today = mealDay();
-    const cur = state.route.date || today;
-    const next = addDays(cur, Number(t.dataset.day));
+    const next = addDays(state.route.date || today, Number(t.dataset.day));
     location.hash = next >= today ? '#/' : `#/day/${next}`;
     return;
   }
   if (t.dataset.month) {
     location.hash = `#/cal/${t.dataset.month}`;
     return;
+  }
+  if (t.dataset.cmonth) {
+    state.cycleMonth = t.dataset.cmonth;
+    renderView();
+    return;
+  }
+  if (t.dataset.cycday) {
+    openCycleSheet('day', t.dataset.cycday);
+    return;
+  }
+  if (t.dataset.cyc) {
+    const a = t.dataset.cyc;
+    if (a.endsWith('-other')) {
+      const d = document.getElementById('cyc-other')?.value;
+      if (!d) return toast('Chọn ngày trước nha', 'error');
+      return doCycleAction(a.replace('-other', ''), d);
+    }
+    return doCycleAction(a, t.dataset.date, t.dataset.id);
+  }
+  if (t.dataset.delcycle) {
+    return doCycleAction('delete', null, t.dataset.delcycle);
   }
   if (t.dataset.goday) {
     location.hash = t.dataset.goday === mealDay() ? '#/' : `#/day/${t.dataset.goday}`;
@@ -1580,18 +1983,6 @@ document.addEventListener('click', async (e) => {
     rerenderComposer();
     return;
   }
-  if (t.dataset.delcmt) {
-    if (!confirm('Xoá bình luận này nha?')) return;
-    try {
-      await api.deleteComment(t.dataset.delcmt);
-      removeCommentById(t.dataset.delcmt);
-      renderViewer();
-      scheduleRender();
-    } catch (err) {
-      toast(err.message, 'error');
-    }
-    return;
-  }
   if (t.dataset.myav) {
     t.closest('.avatar-pick').querySelectorAll('.av-opt').forEach((b) => b.classList.toggle('on', b === t));
     return;
@@ -1617,7 +2008,11 @@ document.addEventListener('click', async (e) => {
       teardown();
       showAuth('login');
       break;
-    case 'new':
+    case 'attach':
+      if (menu) menu.hidden = !menu.hidden;
+      break;
+    case 'chat-report':
+      if (menu) menu.hidden = true;
       navOverlay(`#/new/${mealForTime()}`);
       break;
     case 'close-overlay':
@@ -1626,6 +2021,12 @@ document.addEventListener('click', async (e) => {
     case 'chat-back':
       location.hash = '#/';
       break;
+    case 'nudge': {
+      const mi = MEAL_BY_KEY[t.dataset.meal];
+      await sendChat(`${mi.icon} ${nyName()} ơi, tới giờ ${mi.name.toLowerCase()} rồi đó, ăn liền rồi chụp hình cho ${ownerName()} xem nha 🥺`);
+      toast('Đã nhắn nhắc 💌');
+      break;
+    }
     case 'submit-meal':
       submitMeal();
       break;
@@ -1664,6 +2065,31 @@ document.addEventListener('click', async (e) => {
         toast('Đã sao chép link app 📋');
       } catch {
         prompt('Sao chép link này gửi cho người thương nha:', url);
+      }
+      break;
+    }
+    case 'cycle-first': {
+      const d = document.getElementById('first-start')?.value;
+      if (!d) return toast('Chọn ngày trước nha', 'error');
+      doCycleAction('start', d);
+      break;
+    }
+    case 'cycle-start':
+      openCycleSheet('start');
+      break;
+    case 'cycle-end':
+      openCycleSheet('end');
+      break;
+    case 'save-cycle-settings': {
+      const cl = Number(document.getElementById('cyc-len').value);
+      const pl = Number(document.getElementById('per-len').value);
+      if (!(cl >= 18 && cl <= 60) || !(pl >= 2 && pl <= 12)) return toast('Chu kỳ 18–60 ngày, hành kinh 2–12 ngày nha', 'error');
+      try {
+        state.settings = await api.updateSettings({ cycle_length: cl, period_length: pl, cycle_notify: document.getElementById('cyc-notify').checked });
+        toast('Đã lưu 🍓');
+        renderView();
+      } catch (err) {
+        toast(err.message, 'error');
       }
       break;
     }
@@ -1707,16 +2133,17 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
-    case 'save-reminders': {
+    case 'save-schedule': {
       try {
         state.settings = await api.updateSettings({
+          sched_sang: document.getElementById('sch-sang').value || '07:30',
+          sched_trua: document.getElementById('sch-trua').value || '12:00',
+          sched_toi: document.getElementById('sch-toi').value || '19:00',
           reminders_enabled: document.getElementById('rem-on').checked,
-          remind_targets: document.querySelector('[data-remind-target].on')?.dataset.remindTarget || 'partner',
-          remind_sang: document.getElementById('rem-sang').value || '09:30',
-          remind_trua: document.getElementById('rem-trua').value || '13:00',
-          remind_toi: document.getElementById('rem-toi').value || '20:00',
+          late_alert_owner: document.getElementById('late-owner').checked,
         });
-        toast('Đã lưu giờ nhắc ⏰');
+        toast('Đã lưu giờ ăn ⏰');
+        renderView();
       } catch (err) {
         toast(err.message, 'error');
       }
@@ -1733,7 +2160,13 @@ document.addEventListener('submit', (e) => {
     submitAuth(e.target);
   } else if (e.target.id === 'cmt-form') {
     e.preventDefault();
-    sendComment(e.target);
+    const input = document.getElementById('cmt-input');
+    const text = input.value.trim();
+    const id = state.overlay?.id;
+    if (!text || !id) return;
+    input.value = '';
+    state.viewerDraft = '';
+    sendChat(text, { meal_id: id });
   } else if (e.target.id === 'chat-form') {
     e.preventDefault();
     const input = document.getElementById('chat-text');
@@ -1746,6 +2179,12 @@ document.addEventListener('submit', (e) => {
 
 document.addEventListener('change', (e) => {
   if (e.target.matches('input[data-pick]')) onPickFile(e.target);
+  if (e.target.matches('input[data-chat-pick]')) {
+    const f = e.target.files?.[0];
+    document.getElementById('attach-menu').hidden = true;
+    e.target.value = '';
+    if (f) sendChatMedia(f);
+  }
 });
 
 document.addEventListener('input', (e) => {
@@ -1766,7 +2205,6 @@ document.addEventListener('pointerup', (e) => {
   } else lastTap = now;
 });
 
-// Phím Esc trên máy tính
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && state.overlay) closeOverlay();
 });

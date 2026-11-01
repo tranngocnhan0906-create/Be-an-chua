@@ -3,6 +3,7 @@ import { createClient } from './vendor/supabase.js';
 import { CONFIG } from './config.js';
 
 const BUCKET = 'meals';
+const MSG_COLS = 'id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,media_type,media_path,thumb_path,width,height,duration,bytes,created_at,read_at';
 const SIGNED_TTL = 7 * 24 * 3600; // link ảnh có hạn 7 ngày
 const SIGNED_CACHE_KEY = 'bac-signed-v1';
 
@@ -94,16 +95,12 @@ export const api = {
   },
 
   async loadAll() {
-    const [profiles, settingsRows, reactions, comments, messages] = await Promise.all([
+    const [profiles, settingsRows, reactions, messages, cycles] = await Promise.all([
       sb.from('profiles').select('id,display_name,avatar,created_at').order('created_at').then(must),
       sb.from('couple_settings').select('*').eq('id', 1).then(must),
       sb.from('reactions').select('id,meal_id,user_id,emoji,created_at').then(must),
-      sb.from('comments').select('id,meal_id,user_id,body,created_at').order('created_at').then(must),
-      sb.from('messages')
-        .select('id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,created_at,read_at')
-        .order('created_at', { ascending: false })
-        .limit(600)
-        .then(must),
+      sb.from('messages').select(MSG_COLS).order('created_at', { ascending: false }).limit(800).then(must),
+      sb.from('cycles').select('id,user_id,start_date,end_date,created_by,created_at').order('start_date').then(must),
     ]);
     const meals = [];
     for (let from = 0; ; from += 1000) {
@@ -117,7 +114,7 @@ export const api = {
       meals.push(...page);
       if (page.length < 1000) break;
     }
-    return { profiles, settings: settingsRows[0] || null, meals, reactions, comments, messages: messages.reverse() };
+    return { profiles, settings: settingsRows[0] || null, meals, reactions, messages: messages.reverse(), cycles };
   },
 
   async upload(path, blob, contentType, onProgress) {
@@ -203,14 +200,21 @@ export const api = {
     must(await sb.from('comments').delete().eq('id', id));
   },
 
-  async sendMessage(body, recipientId) {
-    return must(
-      await sb
-        .from('messages')
-        .insert({ kind: 'text', body, recipient_id: recipientId })
-        .select('id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,created_at,read_at')
-        .single(),
-    );
+  /** Gửi tin nhắn: chữ, ảnh/video (media), hoặc bình luận một bữa ăn (meal_id) */
+  async sendMessage(row) {
+    return must(await sb.from('messages').insert({ kind: 'text', ...row }).select(MSG_COLS).single());
+  },
+
+  async addCycle(userId, startDate) {
+    return must(await sb.from('cycles').insert({ user_id: userId, start_date: startDate }).select().single());
+  },
+
+  async updateCycle(id, patch) {
+    return must(await sb.from('cycles').update(patch).eq('id', id).select().single());
+  },
+
+  async deleteCycle(id) {
+    must(await sb.from('cycles').delete().eq('id', id));
   },
 
   async markRead(ids) {
@@ -232,7 +236,7 @@ export const api = {
 
   subscribe(onChange, onStatus) {
     const ch = sb.channel('be-an-chua-db');
-    for (const table of ['meals', 'reactions', 'comments', 'couple_settings', 'profiles', 'messages']) {
+    for (const table of ['meals', 'reactions', 'couple_settings', 'profiles', 'messages', 'cycles']) {
       ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload) => onChange(table, payload));
     }
     ch.subscribe((status) => onStatus?.(status));

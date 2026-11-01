@@ -1,7 +1,7 @@
 {
   "name": "Bé ăn chưa?",
   "short_name": "Bé ăn chưa?",
-  "description": "Nhật ký bữa ăn của hai đứa mình",
+  "description": "Theo dõi giờ ăn, nhắn tin và lịch chị 🍓 của hai đứa mình",
   "lang": "vi",
   "start_url": "./",
   "scope": "./",
@@ -10,11 +10,58 @@
   "background_color": "#fff6f8",
   "theme_color": "#ff8fab",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ],
   "shortcuts": [
-    { "name": "Đăng bữa ăn", "short_name": "Đăng bữa", "url": "./#/new", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+    {
+      "name": "Tin nhắn",
+      "short_name": "Tin nhắn",
+      "url": "./#/chat",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Báo cáo bữa ăn",
+      "short_name": "Báo cáo",
+      "url": "./#/new",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Chị 🍓",
+      "short_name": "Chị 🍓",
+      "url": "./#/cycle",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    }
   ]
 }

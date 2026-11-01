@@ -3,7 +3,7 @@
 export const CONFIG = {
   SUPABASE_URL: 'https://zhilaokwziowyblfimjr.supabase.co',
   SUPABASE_KEY: 'sb_publishable_6Mckw0nyXt6gDpCNNFo2Pw_VdEyQ6VM',
-  APP_VERSION: '1.1.0',
+  APP_VERSION: '2.0.0',
   MAX_VIDEO_SEC: 15,
   MAX_VIDEO_MB: 50,
   STORAGE_LIMIT_MB: 1024, // gói Free của Supabase: 1GB

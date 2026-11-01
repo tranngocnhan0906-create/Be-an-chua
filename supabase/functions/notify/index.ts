@@ -1,7 +1,7 @@
-// Edge Function "notify" — gửi thông báo cho app "Bé ăn chưa?"
-//   {type:"vapid"}            -> trả khoá công khai để điện thoại đăng ký nhận thông báo
-//   {type:"event", table, id} -> do trigger CSDL gọi khi có bài / tim / bình luận mới
-//   {type:"remind"}           -> do cron gọi mỗi 10 phút để nhắc giờ ăn
+// Edge Function "notify" — thông báo cho app "Bé ăn chưa?" (bản 2.0)
+//   {type:"vapid"}            -> khoá công khai để điện thoại đăng ký nhận thông báo
+//   {type:"event", table, id} -> trigger CSDL gọi: bài mới, tim, tin nhắn, chị 🍓 tới/đi
+//   {type:"remind"}           -> cron 10 phút/lần: nhắc Ny trễ bữa + bản tin chị 🍓 lúc 8h sáng
 //   {type:"test"}             -> người dùng bấm "Gửi thử" (cần đăng nhập)
 // Deploy với verify_jwt = false; các nhánh tự kiểm tra và chống gửi trùng.
 
@@ -51,6 +51,13 @@ function truncate(s: string, n: number): string {
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
 }
 
+// ---------- Ngày giờ Việt Nam (UTC+7, không đổi giờ) ----------
+const vnNow = () => new Date(Date.now() + 7 * 3600 * 1000); // các trường UTC = giờ VN
+const vnToday = () => vnNow().toISOString().slice(0, 10);
+const addDays = (s: string, n: number) => new Date(Date.parse(`${s}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+const diffDays = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+const dm = (s: string) => `${s.slice(8, 10)}/${s.slice(5, 7)}`;
+
 // ---------- PostgREST bằng khoá bí mật (bỏ qua RLS) ----------
 function restHeaders(prefer?: string): Record<string, string> {
   const h: Record<string, string> = { apikey: SERVICE_KEY, "Content-Type": "application/json" };
@@ -77,9 +84,26 @@ interface Profile {
   avatar: string;
 }
 
-async function profilesMap(): Promise<Map<string, Profile>> {
+/** Hai người theo thứ tự tạo tài khoản: người đầu là chủ app, người thứ hai là Ny */
+async function couple() {
   const rows = await rest<Profile[]>("profiles?select=id,display_name,avatar&order=created_at.asc");
-  return new Map(rows.map((r) => [r.id, r]));
+  const people = new Map(rows.map((r) => [r.id, r]));
+  return { people, owner: rows[0] as Profile | undefined, ny: rows[1] as Profile | undefined };
+}
+
+// deno-lint-ignore no-explicit-any
+async function getSettings(): Promise<any> {
+  return (await rest("couple_settings?id=eq.1&select=*"))[0] ?? {};
+}
+
+/** Ghi sổ đã gửi (khoá chống gửi trùng). Trả về true nếu là lần đầu */
+async function firstTime(userId: string, day: string, key: string): Promise<boolean> {
+  const inserted = await rest<unknown[]>("reminder_log?on_conflict=user_id,meal_date,meal_type", {
+    method: "POST",
+    prefer: "resolution=ignore-duplicates,return=representation",
+    body: { user_id: userId, meal_date: day, meal_type: key },
+  });
+  return !!inserted?.length;
 }
 
 // ---------- Khoá VAPID: tự tạo lần đầu, lưu trong bảng bí mật ----------
@@ -135,9 +159,190 @@ async function pushTo(userIds: string[], data: { title: string; body: string; ta
   return { sent: results.filter((r) => r.ok).length, total: results.length, errors };
 }
 
-// ---------- Bài / tim / bình luận mới ----------
+// ====================================================================== CHỊ 🍓
+interface Cycle {
+  id: string;
+  user_id: string;
+  start_date: string;
+  end_date: string | null;
+  start_notified_at?: string | null;
+  end_notified_at?: string | null;
+}
+
+function predict(cycles: Cycle[], cycleLen = 28, periodLen = 5) {
+  const list = [...cycles].sort((a, b) => a.start_date.localeCompare(b.start_date));
+  if (!list.length) return null;
+  const lens: number[] = [];
+  for (let i = 1; i < list.length; i++) {
+    const d = diffDays(list[i - 1].start_date, list[i].start_date);
+    if (d >= 18 && d <= 60) lens.push(d);
+  }
+  const recent = lens.slice(-6);
+  const avgCycle = recent.length ? Math.round(recent.reduce((a, b) => a + b, 0) / recent.length) : cycleLen;
+  const plens = list.filter((c) => c.end_date).map((c) => diffDays(c.start_date, c.end_date!) + 1)
+    .filter((n) => n >= 2 && n <= 12).slice(-6);
+  const avgPeriod = plens.length ? Math.round(plens.reduce((a, b) => a + b, 0) / plens.length) : periodLen;
+  const last = list[list.length - 1];
+  const nextStart = addDays(last.start_date, avgCycle);
+  const ovulation = addDays(nextStart, -14);
+  return { last, avgCycle, avgPeriod, nextStart, ovulation, fertileStart: addDays(ovulation, -5), fertileEnd: addDays(ovulation, 1) };
+}
+
+const CYCLE_NEWS: Record<string, { title: string; ny: string[]; owner: string[] }> = {
+  pms: {
+    title: "🌋 Sắp vào mùa dễ nóng tính",
+    ny: [
+      "Còn 3 ngày nữa chị 🍓 ghé. Từ giờ {ny} được quyền dỗi vô cớ, ai cãi mèo cào 😼",
+      "Ba ngày nữa chị 🍓 tới. Tự nhiên thấy ai cũng đáng ghét là do hormone, không phải do {ny} đâu 😌",
+    ],
+    owner: [
+      "Báo động cam 🚨 3 ngày nữa chị 🍓 tới thăm {ny}. {owner} kích hoạt chế độ nhường nhịn, cất sẵn trà sữa 🧋",
+      "Còn 3 ngày chị 🍓 ghé 🧯 {owner} ghi nhớ: {ny} nói gì cũng đúng, {ny} dỗi thì dỗ, {ny} đói thì cho ăn 🍰",
+    ],
+  },
+  eve: {
+    title: "🍓 Mai chị 🍓 ghé",
+    ny: [
+      "Mai chị 🍓 ghé đó! Bỏ sẵn băng vệ sinh vào túi nha 🎒",
+      "Chị 🍓 hẹn mai tới chơi. Mặc đồ tối màu cho chắc ăn nha 😆",
+    ],
+    owner: [
+      "Mai chị 🍓 tới thăm {ny}. {owner} nạp sẵn socola 🍫, túi chườm ♨️ và một trái tim bao dung 💗",
+      "Ngày mai chị 🍓 tới. {owner} tập sẵn câu thần chú: \"Em nói đúng, em ăn gì anh mua\" 🙏",
+    ],
+  },
+  due: {
+    title: "📅 Hôm nay chị 🍓 có hẹn",
+    ny: ["Theo lịch thì hôm nay chị 🍓 ghé. Tới rồi bấm \"Chị tới rồi\" cho mèo ghi sổ nha 🐱"],
+    owner: ["Dự kiến hôm nay chị 🍓 ghé. {owner} nói chuyện nhỏ nhẹ, tuyệt đối không cãi lý nha 🙏"],
+  },
+  start: {
+    title: "🍓 Chị 🍓 đã tới",
+    ny: [
+      "Mèo ghi sổ rồi! Uống nước ấm, tránh đồ lạnh, đau quá thì nhắn {owner} liền nha 💗",
+      "Chị 🍓 tới rồi. Hôm nay {ny} được miễn mọi việc nặng, nằm nghỉ cho khoẻ nha 🛌",
+    ],
+    owner: [
+      "Chị 🍓 đã tới! {owner} lên đồ: nước ấm, socola, một cái ôm thật lâu 🫂",
+      "{ny} đang trong \"kỳ nghỉ đỏ\" 🚑 {owner} chuyển sang chế độ chiều chuộng cấp 3 🫶",
+    ],
+  },
+  day2: {
+    title: "🫖 Ngày 2 của chị 🍓",
+    ny: ["Ngày 2 thường mệt nhất. Chườm ấm bụng, ngủ thêm chút nha. {owner} đang được mèo nhắc chăm {ny} đó 😽"],
+    owner: ["Ngày 2 thường mệt nhất. {owner} mua gì ấm ấm mang qua cho {ny} đi 🍲"],
+  },
+  end: {
+    title: "🎉 Chị 🍓 về rồi",
+    ny: ["Hết kỳ nghỉ đỏ! {ny} hồi máu 100% rồi đó 💪", "Chị 🍓 về rồi. Thưởng cho {ny} một ly trà sữa nha 🧋"],
+    owner: ["Chị 🍓 về rồi! {ny} hồi máu 100%, {owner} được phép trêu nhẹ trở lại 😆", "Hết kỳ nghỉ đỏ 🎉 Rủ {ny} đi ăn mừng một bữa đi {owner} 🍜"],
+  },
+  fertile: {
+    title: "🌸 Những ngày dễ thụ thai",
+    ny: ["Từ hôm nay tới {den} là những ngày dễ thụ thai (dự đoán). Lưu ý nha 😉"],
+    owner: ["{ny} đang vào những ngày dễ thụ thai (dự đoán, tới {den}). {owner} lưu ý nha 😉"],
+  },
+  ovulation: {
+    title: "🥚 Ngày rụng trứng",
+    ny: ["Hôm nay là ngày rụng trứng dự đoán. Nghe nói da đẹp, mood lên hương ✨"],
+    owner: ["Hôm nay là ngày rụng trứng dự đoán của {ny}. Khen {ny} xinh lúc này là chuẩn bài 💐"],
+  },
+  late: {
+    title: "⏰ Chị 🍓 trễ hẹn",
+    ny: ["Chị 🍓 trễ hẹn 3 ngày rồi. Căng thẳng hay thức khuya cũng làm trễ đó, đừng lo quá nha. Tới thì bấm báo mèo 🐱"],
+    owner: ["Chị 🍓 trễ hẹn 3 ngày. {owner} bình tĩnh, quan tâm {ny} nhiều hơn nha 🤍"],
+  },
+  late7: {
+    title: "🩺 Chị 🍓 trễ 1 tuần",
+    ny: ["Chị 🍓 trễ 1 tuần rồi. Nếu thấy lo thì kiểm tra hoặc hỏi bác sĩ cho yên tâm nha 🩺"],
+    owner: ["Chị 🍓 trễ 1 tuần. {owner} ở bên {ny}, cùng bình tĩnh tìm hiểu nha 🤝"],
+  },
+  long: {
+    title: "🩺 Chị 🍓 ở lâu quá",
+    ny: ["Chị 🍓 ở lại 9 ngày rồi. Nếu chị đi rồi thì bấm \"Chị đi rồi\" nha; còn nếu vẫn kéo dài thì nên hỏi bác sĩ 🩺"],
+    owner: ["Chị 🍓 ở lại khá lâu (9 ngày). {owner} hỏi han {ny} xem có mệt không nha 🤍"],
+  },
+};
+
+async function sendCycleNews(event: string, vars: { den?: string } = {}) {
+  const news = CYCLE_NEWS[event];
+  if (!news) return { skipped: "unknown event" };
+  const { owner, ny } = await couple();
+  if (!ny || !owner) return { skipped: "no couple" };
+  const fill = (t: string) =>
+    t.replaceAll("{ny}", ny.display_name).replaceAll("{owner}", owner.display_name).replaceAll("{den}", vars.den ?? "");
+  const nyText = fill(pick(news.ny));
+  const ownerText = fill(pick(news.owner));
+  await rest("messages", {
+    method: "POST",
+    prefer: "return=minimal",
+    body: { sender_id: null, recipient_id: ny.id, kind: "cycle", body: JSON.stringify({ event, title: news.title, ny: nyText, owner: ownerText }) },
+  }).catch((e) => console.warn("cycle message", String(e)));
+  const a = await pushTo([ny.id], { title: news.title, body: nyText, tag: `cycle-${event}`, url: "#/cycle" });
+  const b = await pushTo([owner.id], { title: news.title, body: ownerText, tag: `cycle-${event}`, url: "#/cycle" });
+  return { event, ny: a, owner: b };
+}
+
+async function handleCycleEvent(id: string) {
+  const c = (await rest<Cycle[]>(`cycles?id=eq.${id}&select=*`))[0];
+  if (!c) return { skipped: "missing" };
+  const today = vnToday();
+  let event: string | null = null;
+  if (c.end_date && !c.end_notified_at) {
+    const won = await rest<unknown[]>(`cycles?id=eq.${id}&end_notified_at=is.null`, {
+      method: "PATCH", prefer: "return=representation", body: { end_notified_at: new Date().toISOString() },
+    });
+    if (!won?.length) return { skipped: "dup" };
+    if (Math.abs(diffDays(c.end_date, today)) <= 2) event = "end";
+  } else if (!c.start_notified_at) {
+    const won = await rest<unknown[]>(`cycles?id=eq.${id}&start_notified_at=is.null`, {
+      method: "PATCH", prefer: "return=representation", body: { start_notified_at: new Date().toISOString() },
+    });
+    if (!won?.length) return { skipped: "dup" };
+    if (Math.abs(diffDays(c.start_date, today)) <= 2) event = "start"; // nhập lịch sử cũ thì không báo
+  }
+  const settings = await getSettings();
+  if (!event || settings.cycle_notify === false) return { silent: true };
+  return await sendCycleNews(event);
+}
+
+async function cycleDigest(settings: Record<string, unknown>) {
+  if (settings.cycle_notify === false) return { skipped: "off" };
+  const { ny } = await couple();
+  if (!ny) return { skipped: "no ny" };
+  const cycles = await rest<Cycle[]>(`cycles?user_id=eq.${ny.id}&select=*&order=start_date.asc`);
+  const pred = predict(cycles, Number(settings.cycle_length) || 28, Number(settings.period_length) || 5);
+  if (!pred) return { skipped: "no data" };
+  const today = vnToday();
+  const last = pred.last;
+  const sinceStart = diffDays(last.start_date, today);
+  const ongoing = !last.end_date && sinceStart >= 0 && sinceStart < 12;
+  const events: string[] = [];
+  if (ongoing) {
+    if (sinceStart + 1 === 2) events.push("day2");
+    if (sinceStart + 1 === 9) events.push("long");
+  } else {
+    const toNext = diffDays(today, pred.nextStart);
+    if (toNext === 3) events.push("pms");
+    if (toNext === 1) events.push("eve");
+    if (toNext === 0) events.push("due");
+    if (toNext === -3) events.push("late");
+    if (toNext === -7) events.push("late7");
+    if (today === pred.fertileStart) events.push("fertile");
+    if (today === pred.ovulation) events.push("ovulation");
+  }
+  const out = [];
+  for (const ev of events) {
+    if (!(await firstTime(ny.id, today, `cycle:${ev}`))) continue;
+    out.push(await sendCycleNews(ev, { den: dm(pred.fertileEnd) }));
+  }
+  return { events, out };
+}
+
+// ====================================================================== SỰ KIỆN
 async function handleEvent(table: string, id: string) {
-  if (!["meals", "comments", "reactions", "messages"].includes(table) || !UUID_RE.test(id)) return { skipped: "bad input" };
+  if (!["meals", "comments", "reactions", "messages", "cycles"].includes(table) || !UUID_RE.test(id)) return { skipped: "bad input" };
+  if (table === "cycles") return await handleCycleEvent(id);
 
   // "Giành quyền" gửi: chỉ dòng chưa thông báo mới được gửi (chống gửi trùng)
   // deno-lint-ignore no-explicit-any
@@ -149,23 +354,29 @@ async function handleEvent(table: string, id: string) {
   const row = claimed?.[0];
   if (!row) return { skipped: "already notified or missing" };
 
-  const people = await profilesMap();
+  const { people } = await couple();
 
-  // Tin nhắn chữ: báo cho người nhận
   if (table === "messages") {
     if (row.kind !== "text") return { skipped: "not text" };
     const sender = people.get(row.sender_id);
+    const name = sender?.display_name ?? "Người thương";
     const to = row.recipient_id ? [row.recipient_id] : [...people.keys()].filter((uid) => uid !== row.sender_id);
-    return await pushTo(to, {
-      title: `💬 ${sender?.avatar ?? ""} ${sender?.display_name ?? "Người thương"}`.replace(/\s+/g, " "),
-      body: truncate(row.body ?? "", 160),
-      tag: `chat-${row.sender_id}`,
-      url: "#/chat",
-    });
+    let body = truncate(row.body ?? "", 160);
+    if (!body) body = row.media_type === "video" ? "🎬 Đã gửi một video" : row.media_type === "image" ? "📷 Đã gửi một ảnh" : "💌";
+    if (row.meal_id) {
+      // deno-lint-ignore no-explicit-any
+      const meal = (await rest<any[]>(`meals?id=eq.${row.meal_id}&select=id,meal_type`))[0];
+      return await pushTo(to, {
+        title: `💬 ${name} bình luận ${MEAL_LABEL[meal?.meal_type] ?? "bữa ăn"}`,
+        body,
+        tag: `cmt-${row.meal_id}`,
+        url: `#/p/${row.meal_id}`,
+      });
+    }
+    return await pushTo(to, { title: `💬 ${sender?.avatar ?? ""} ${name}`.trim(), body, tag: `chat-${row.sender_id}`, url: "#/chat" });
   }
 
   const actorName = people.get(row.user_id)?.display_name ?? "Người thương";
-
   let meal = row;
   if (table !== "meals") {
     // deno-lint-ignore no-explicit-any
@@ -180,7 +391,7 @@ async function handleEvent(table: string, id: string) {
 
   if (table === "meals") {
     return await pushTo(others, {
-      title: `${icon} ${actorName} vừa đăng ${label}!`,
+      title: `${icon} ${actorName} vừa báo cáo ${label}!`,
       body: truncate(row.caption ?? "", 120) ||
         pick(["Vào xem ăn gì nè 😋", "Nhìn ngon ghê, vào thả tim đi 💕", "Có hình mới nè, xem liền đi 🐱"]),
       tag: `meal-${row.id}`,
@@ -188,14 +399,8 @@ async function handleEvent(table: string, id: string) {
     });
   }
   if (table === "comments") {
-    return await pushTo(others, {
-      title: `💬 ${actorName} bình luận ${label}`,
-      body: truncate(row.body, 140),
-      tag: `cmt-${meal.id}`,
-      url,
-    });
+    return await pushTo(others, { title: `💬 ${actorName} bình luận ${label}`, body: truncate(row.body, 140), tag: `cmt-${meal.id}`, url });
   }
-  // reactions: chỉ báo cho chủ bài, và không báo khi tự thả tim
   if (meal.user_id === row.user_id) return { skipped: "self reaction" };
   return await pushTo([meal.user_id], {
     title: `${row.emoji || "❤️"} ${actorName} thả tim ${label} nè`,
@@ -205,66 +410,67 @@ async function handleEvent(table: string, id: string) {
   });
 }
 
-// ---------- Nhắc giờ ăn (cron gọi mỗi 10 phút) ----------
+// ====================================================================== NHẮC GIỜ ĂN
+const hhmm = (t: string) => t.slice(0, 5);
+
 async function handleRemind() {
-  // deno-lint-ignore no-explicit-any
-  const settings = (await rest<any[]>("couple_settings?id=eq.1&select=*"))[0];
-  if (!settings?.reminders_enabled) return { skipped: "disabled" };
+  const settings = await getSettings();
+  const now = vnNow();
+  const minutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const out: unknown[] = [];
 
-  const nowVN = new Date(Date.now() + 7 * 3600 * 1000); // giờ Việt Nam (UTC+7, không đổi giờ)
-  const minutes = nowVN.getUTCHours() * 60 + nowVN.getUTCMinutes();
-  const mealDay = new Date(nowVN.getTime() - 5 * 3600 * 1000).toISOString().slice(0, 10);
-
-  const slots: [string, string][] = [["sang", "remind_sang"], ["trua", "remind_trua"], ["toi", "remind_toi"]];
-  const due = slots.filter(([, col]) => {
-    const t = settings[col] as string | null;
-    if (!t) return false;
-    const [h, m] = t.split(":").map(Number);
-    const start = h * 60 + m;
-    return minutes >= start && minutes < start + 30;
-  }).map(([type]) => type);
-  if (!due.length) return { due };
-
-  const people = await profilesMap(); // xếp theo ngày tạo: người đầu tiên là chủ app
-  const ownerId = [...people.keys()][0];
-  const targets = settings.remind_targets === "both"
-    ? [...people.keys()]
-    : [...people.keys()].filter((uid) => uid !== ownerId);
-  const out = [];
-  for (const type of due) {
-    const label = MEAL_LABEL[type];
-    const meals = await rest<{ user_id: string }[]>(`meals?select=user_id&meal_date=eq.${mealDay}&meal_type=eq.${type}`);
-    const done = new Set(meals.map((m) => m.user_id));
-    for (const uid of targets) {
-      const p = people.get(uid)!;
-      if (done.has(uid)) continue;
-      const inserted = await rest<unknown[]>("reminder_log?on_conflict=user_id,meal_date,meal_type", {
-        method: "POST",
-        prefer: "resolution=ignore-duplicates,return=representation",
-        body: { user_id: uid, meal_date: mealDay, meal_type: type },
-      });
-      if (!inserted?.length) continue; // đã nhắc rồi
-      const partner = [...people.values()].find((x) => x.id !== uid);
-      const text = partner
-        ? `Tới giờ ${label} rồi nè ${p.display_name}! ${partner.display_name} đang chờ báo cáo ${label} đó 🥺`
-        : `Tới giờ ${label} rồi nè! Nhớ ăn rồi chụp hình nha 🐱`;
-      await rest("messages", {
-        method: "POST",
-        prefer: "return=minimal",
-        body: { sender_id: null, recipient_id: uid, kind: "reminder", body: text, meal_type: type, meal_date: mealDay },
-      }).catch((e) => console.warn("reminder message", String(e)));
-      const r = await pushTo([uid], {
-        title: `⏰ Tới giờ ${label} rồi nè!`,
-        body: partner
-          ? `${partner.display_name} đang chờ báo cáo ${label} của ${p.display_name} đó 🥺`
-          : `Nhớ ăn ${label} rồi chụp hình nha 🐱`,
-        tag: `remind-${type}`,
-        url: "#/chat",
-      });
-      out.push({ uid, type, ...r });
-    }
+  // Bản tin chị 🍓 lúc 8h sáng
+  if (minutes >= 8 * 60 && minutes < 8 * 60 + 30) {
+    out.push({ cycle: await cycleDigest(settings).catch((e) => ({ error: String(e) })) });
   }
-  return { due, out };
+
+  if (settings.reminders_enabled === false) return { skipped: "meals off", out };
+  const { owner, ny } = await couple();
+  if (!ny) return { skipped: "no ny", out };
+  const ownerName = owner?.display_name ?? "anh";
+  const mealDay = new Date(now.getTime() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+
+  const slots: [string, string][] = [["sang", "sched_sang"], ["trua", "sched_trua"], ["toi", "sched_toi"]];
+  for (const [type, col] of slots) {
+    const t = String(settings[col] ?? "");
+    if (!/^\d{2}:\d{2}/.test(t)) continue;
+    const [h, m] = t.split(":").map(Number);
+    const sched = h * 60 + m;
+    const label = MEAL_LABEL[type];
+    let stage = 0;
+    if (minutes >= sched + 15 && minutes < sched + 45) stage = 1;
+    else if (minutes >= sched + 60 && minutes < sched + 90) stage = 2;
+    if (!stage) continue;
+    const posted = await rest<unknown[]>(`meals?select=id&user_id=eq.${ny.id}&meal_date=eq.${mealDay}&meal_type=eq.${type}&limit=1`);
+    if (posted.length) continue;
+    if (!(await firstTime(ny.id, mealDay, stage === 1 ? type : `${type}+60`))) continue;
+
+    const text = stage === 1
+      ? `Tới giờ ${label} (${hhmm(t)}) rồi nè ${ny.display_name}! ${ownerName} đang chờ báo cáo đó 🥺`
+      : `🚨 Trễ ${label} 1 tiếng rồi đó ${ny.display_name}! Ăn liền rồi báo cáo cho ${ownerName} nha 😾`;
+    await rest("messages", {
+      method: "POST",
+      prefer: "return=minimal",
+      body: { sender_id: null, recipient_id: ny.id, kind: "reminder", body: text, meal_type: type, meal_date: mealDay },
+    }).catch((e) => console.warn("reminder message", String(e)));
+    const r1 = await pushTo([ny.id], {
+      title: stage === 1 ? `⏰ Tới giờ ${label} rồi nè!` : `🚨 Trễ ${label} 1 tiếng rồi!`,
+      body: stage === 1 ? `${ownerName} đang chờ báo cáo ${label} đó 🥺` : `Ăn liền đi rồi chụp hình báo cáo cho ${ownerName} nha 😾`,
+      tag: `remind-${type}`,
+      url: "#/chat",
+    });
+    let r2 = null;
+    if (stage === 2 && owner && settings.late_alert_owner !== false) {
+      r2 = await pushTo([owner.id], {
+        title: `🚨 ${ny.display_name} trễ ${label} 1 tiếng`,
+        body: `Giờ ăn ${hhmm(t)} mà chưa thấy hình. Nhắn nhắc ${ny.display_name} đi ${ownerName}!`,
+        tag: `late-${type}`,
+        url: "#/",
+      });
+    }
+    out.push({ type, stage, ny: r1, owner: r2 });
+  }
+  return { minutes, out };
 }
 
 // ---------- Gửi thử cho chính mình ----------
@@ -274,11 +480,11 @@ async function handleTest(req: Request) {
   const res = await fetch(`${SB_URL}/auth/v1/user`, { headers: { apikey: PUBLIC_KEY, Authorization: `Bearer ${token}` } });
   if (!res.ok) return json({ error: "Phiên đăng nhập hết hạn" }, 401);
   const user = await res.json();
-  const people = await profilesMap();
+  const { people } = await couple();
   if (!people.has(user.id)) return json({ error: "Không phải thành viên" }, 403);
   const r = await pushTo([user.id], {
     title: "🔔 Thông báo chạy ngon rồi nè!",
-    body: "Từ giờ có bài mới hay tới giờ ăn là mèo báo liền 🐱",
+    body: "Từ giờ có tin nhắn, giờ ăn hay chị 🍓 ghé là mèo báo liền 🐱",
     tag: "test",
     url: "#/",
   });

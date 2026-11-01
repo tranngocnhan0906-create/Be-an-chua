@@ -212,3 +212,127 @@ export const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 export const isAndroid = () => /android/i.test(navigator.userAgent);
 export const isStandalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+
+// ====================================================================== GIỜ ĂN & TRỄ BỮA
+export const SCHED_KEYS = { sang: 'sched_sang', trua: 'sched_trua', toi: 'sched_toi' };
+export const SCHED_DEFAULT = { sang: '07:30', trua: '12:00', toi: '19:00' };
+
+/** Giờ ăn chuẩn (phút trong ngày) của một bữa chính, null nếu là bữa phụ */
+export function schedMinutes(settings, mealKey) {
+  if (!SCHED_KEYS[mealKey]) return null;
+  const t = String(settings?.[SCHED_KEYS[mealKey]] || SCHED_DEFAULT[mealKey]);
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + (m || 0);
+}
+
+export function fmtHM(minutes) {
+  return `${pad(Math.floor(minutes / 60) % 24)}:${pad(minutes % 60)}`;
+}
+
+/** Thời điểm giờ ăn chuẩn của ngày dateStr (giờ máy) */
+export function schedDate(dateStr, minutes) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d, 0, minutes, 0, 0);
+}
+
+/** "25 phút", "1 giờ 20 phút", "3 giờ" */
+export function fmtDur(min) {
+  const v = Math.max(0, Math.round(min));
+  if (v < 60) return `${v} phút`;
+  const h = Math.floor(v / 60);
+  const m = v % 60;
+  return m ? `${h} giờ ${m} phút` : `${h} giờ`;
+}
+
+/** Nhãn đúng giờ/trễ cho số phút lệch so với giờ ăn chuẩn */
+export function lateInfo(late) {
+  if (late <= -16) return { cls: 'early', icon: '👍', text: `Sớm ${fmtDur(-late)}` };
+  if (late <= 15) return { cls: 'ontime', icon: '✅', text: 'Đúng giờ' };
+  if (late < 60) return { cls: 'late', icon: '⏰', text: `Trễ ${fmtDur(late)}` };
+  if (late < 12 * 60) return { cls: 'late2', icon: '⏰', text: `Trễ ${fmtDur(late)}` };
+  return { cls: 'late2', icon: '🕒', text: 'Đăng bù' };
+}
+
+// ====================================================================== CHỊ 🍓 (chu kỳ)
+/**
+ * Dự đoán chu kỳ từ lịch sử. Trung bình tối đa 6 kỳ gần nhất; ít dữ liệu thì dùng số mặc định.
+ * Trả về null nếu chưa có kỳ nào.
+ */
+export function cyclePredict(cycles, cycleLen = 28, periodLen = 5) {
+  const list = [...(cycles || [])].sort((a, b) => a.start_date.localeCompare(b.start_date));
+  if (!list.length) return null;
+  const lens = [];
+  for (let i = 1; i < list.length; i++) {
+    const d = daysBetween(list[i - 1].start_date, list[i].start_date);
+    if (d >= 18 && d <= 60) lens.push(d);
+  }
+  const recent = lens.slice(-6);
+  const avgCycle = recent.length ? Math.round(recent.reduce((a, b) => a + b, 0) / recent.length) : cycleLen;
+  const plens = list.filter((c) => c.end_date).map((c) => daysBetween(c.start_date, c.end_date) + 1)
+    .filter((n) => n >= 2 && n <= 12).slice(-6);
+  const avgPeriod = plens.length ? Math.round(plens.reduce((a, b) => a + b, 0) / plens.length) : periodLen;
+  const last = list[list.length - 1];
+  const nextStart = addDays(last.start_date, avgCycle);
+  const ovulation = addDays(nextStart, -14);
+  const future = [];
+  for (let k = 1; k <= 4; k++) {
+    const s = addDays(last.start_date, avgCycle * k);
+    const ov = addDays(s, -14);
+    future.push({
+      start: s,
+      end: addDays(s, avgPeriod - 1),
+      ovulation: ov,
+      fertileStart: addDays(ov, -5),
+      fertileEnd: addDays(ov, 1),
+      pmsStart: addDays(s, -3),
+    });
+  }
+  return {
+    list, last, avgCycle, avgPeriod, nextStart, ovulation,
+    fertileStart: addDays(ovulation, -5), fertileEnd: addDays(ovulation, 1), pmsStart: addDays(nextStart, -3),
+    future, samples: recent.length,
+  };
+}
+
+/** Trạng thái hôm nay để hiển thị */
+export function cycleStatus(pred, today) {
+  if (!pred) return { phase: 'nodata' };
+  const last = pred.last;
+  const since = daysBetween(last.start_date, today);
+  const inLogged = last.end_date ? since >= 0 && today <= last.end_date : since >= 0 && since < 12;
+  if (inLogged) {
+    return { phase: 'period', day: since + 1, ongoing: !last.end_date };
+  }
+  const toNext = daysBetween(today, pred.nextStart);
+  if (toNext < 0) return { phase: 'late', lateBy: -toNext, toNext };
+  if (toNext === 0) return { phase: 'due', toNext };
+  if (today === pred.ovulation) return { phase: 'ovulation', toNext };
+  if (today >= pred.fertileStart && today <= pred.fertileEnd) return { phase: 'fertile', toNext };
+  if (toNext <= 3) return { phase: 'pms', toNext };
+  return { phase: 'normal', toNext };
+}
+
+/** Lớp màu cho một ngày trên lịch chị 🍓 */
+export function cycleDayKinds(date, pred, today) {
+  const kinds = new Set();
+  if (!pred) return kinds;
+  for (const c of pred.list) {
+    let end = c.end_date;
+    if (!end) {
+      const guess = addDays(c.start_date, pred.avgPeriod - 1);
+      end = c === pred.last && today < guess ? guess : (c === pred.last ? (today > guess ? today : guess) : guess);
+      if (c === pred.last && daysBetween(c.start_date, today) >= 12) end = guess;
+    }
+    if (date >= c.start_date && date <= end) {
+      kinds.add(c.end_date || date <= today ? 'period' : 'period-pred');
+    }
+  }
+  if (kinds.size) return kinds;
+  for (const f of pred.future) {
+    if (date >= f.start && date <= f.end) kinds.add('period-pred');
+    if (date === f.ovulation) kinds.add('ovulation');
+    else if (date >= f.fertileStart && date <= f.fertileEnd) kinds.add('fertile');
+    if (date >= f.pmsStart && date < f.start) kinds.add('pms');
+  }
+  return kinds;
+}
