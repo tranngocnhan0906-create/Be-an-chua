@@ -1116,3 +1116,31 @@ body.chat-dark .msg-status, body.chat-dark .chat-empty { color: var(--muted); }
 .sc-timebtn .sc-hm.end { font-size: 12.5px; }
 .time-sheet h3 { font-size: 20px; margin-bottom: 12px; }
 .time-sheet .chips { margin: 2px 0 14px; }
+
+/* ===================== Bản 2.3: link mời & quản lí tài khoản ===================== */
+.invite-banner {
+  background: linear-gradient(135deg, #fff1d6, #ffe0ea); border: 2px dashed #ffc2a0; border-radius: 18px;
+  padding: 12px 14px; font-weight: 800; font-size: 14.5px; line-height: 1.45; margin-bottom: 14px; color: #8a3a52;
+}
+@media (prefers-color-scheme: dark) { .invite-banner { background: #42301c; color: #ffd9b0; border-color: #7a5532; } }
+.admin-card { border: 2px solid #ffd27a; }
+.admin-card h3 { color: #c07a00; }
+@media (prefers-color-scheme: dark) { .admin-card { border-color: #7a5a1c; } .admin-card h3 { color: #ffc861; } }
+.member-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 4px 0 14px; }
+.member-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 16px; background: var(--bg); min-width: 0; }
+.member-row .btn { flex: none; }
+.admin-card .btn-row .btn { white-space: nowrap; }
+.mr-av { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-size: 24px; background: var(--card); flex: none; }
+.mr-main { flex: 1; min-width: 0; }
+.mr-main b { display: block; font-size: 15.5px; }
+.mr-main small { display: block; color: var(--muted); font-weight: 700; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.invite-box {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; margin-bottom: 10px;
+  border-radius: 16px; border: 2px dashed var(--primary); background: var(--primary-soft);
+}
+.ib-code small { display: block; color: var(--muted); font-weight: 800; font-size: 12px; }
+.ib-code b { font-family: var(--font-display); font-size: 24px; letter-spacing: 1.5px; color: var(--primary-strong); }
+.kick-sheet h3 { font-size: 22px; margin: 6px 0 8px; }
+.kick-av { display: inline-grid; place-items: center; width: 72px; height: 72px; border-radius: 50%; background: var(--primary-soft); font-size: 42px; }
+.btn.danger-fill { background: linear-gradient(135deg, #ff7a7f, var(--red)); box-shadow: 0 6px 16px rgba(229, 72, 77, .3); color: #fff; }
+.mr-email { font-weight: 600 !important; }

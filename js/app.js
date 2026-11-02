@@ -1,4 +1,4 @@
-// Bé ăn chưa? — bản 2.2: Lịch ăn · Lịch học · Tin nhắn · Chị 🍓 · Hai đứa
+// Bé ăn chưa? — bản 2.3: Lịch ăn · Lịch học · Tin nhắn · Chị 🍓 · Hai đứa · link mời
 import { api } from './api.js';
 import { CONFIG } from './config.js';
 import {
@@ -94,6 +94,30 @@ if ('serviceWorker' in navigator) {
 
 document.addEventListener('pointerdown', () => unlockSound(), { passive: true });
 
+const INVITE_KEY = 'bac-invite';
+(function captureInvite() {
+  try {
+    const url = new URL(location.href);
+    const code = url.searchParams.get('moi');
+    if (!code) return;
+    localStorage.setItem(INVITE_KEY, code.trim().toUpperCase().slice(0, 20));
+    url.searchParams.delete('moi');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+  } catch { /* bỏ qua */ }
+})();
+function pendingInvite() {
+  try {
+    return localStorage.getItem(INVITE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+function clearInvite() {
+  try {
+    localStorage.removeItem(INVITE_KEY);
+  } catch { /* bỏ qua */ }
+}
+
 boot();
 
 async function boot() {
@@ -112,7 +136,7 @@ async function boot() {
     }
   });
   if (session) enterApp(session);
-  else showAuth('login');
+  else showAuth(pendingInvite() ? 'signup' : 'login');
 }
 
 function teardown() {
@@ -132,6 +156,7 @@ function enterApp(session) {
 
 async function doEnterApp(session) {
   state.uid = session.user.id;
+  clearInvite();
   app.innerHTML = `<div class="center-screen">${cat({ size: 110, mood: 'happy', cls: 'bounce' })}<p class="muted">Đang dọn mâm…</p></div>`;
   try {
     await loadData();
@@ -220,7 +245,10 @@ function onDbChange(table, p) {
     const brand = document.querySelector('.brand-name');
     if (brand) brand.textContent = state.settings.app_name;
   } else if (table === 'profiles') {
-    if (n.id) state.profiles.set(n.id, { ...(state.profiles.get(n.id) || {}), ...n });
+    if (p.eventType === 'DELETE') {
+      if (o.id === state.uid) return kickedOut();
+      state.profiles.delete(o.id);
+    } else if (n.id) state.profiles.set(n.id, { ...(state.profiles.get(n.id) || {}), ...n });
   } else if (table === 'messages') {
     if (state.route.name === 'chat') state.chatStick = state.chatStick || isNearBottom();
     const fresh = p.eventType === 'INSERT' && n.id && !state.messages.has(n.id);
@@ -524,8 +552,9 @@ function showAuth(mode = 'login') {
           <label class="field"><span>Mật khẩu</span>
             <input name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" placeholder="Ít nhất 6 ký tự" minlength="6" required></label>
           ${signup ? `
-            <label class="field"><span>Mã mời</span>
-              <input name="invite" autocapitalize="characters" autocomplete="off" placeholder="Mã do người tạo app gửi" required></label>` : ''}
+            ${pendingInvite() ? `<div class="invite-banner" id="invite-banner">🎟️ Bạn được mời vào app rồi! Tạo tài khoản là vào được luôn, không cần mã mời.</div>` : ''}
+            <label class="field" id="invite-field" ${pendingInvite() ? 'hidden' : ''}><span>Mã mời</span>
+              <input name="invite" autocapitalize="characters" autocomplete="off" placeholder="Mã do người tạo app gửi" value="${esc(pendingInvite())}" required></label>` : ''}
         </div>
         ${signup ? `
           <div class="auth-step" data-step="2" hidden>
@@ -621,7 +650,19 @@ async function submitAuth(form) {
     await enterApp(session);
   } catch (e) {
     err.textContent = e.message;
-    if (signup && /mời|email|mật khẩu/i.test(e.message)) signupStep(1);
+    if (signup && /mã mời/i.test(e.message)) {
+      // link mời hết hạn (đã đổi mã) hoặc app đủ người: cho nhập mã tay
+      clearInvite();
+      document.getElementById('invite-banner')?.remove();
+      const f = document.getElementById('invite-field');
+      if (f) f.hidden = false;
+      const inp = form.querySelector('input[name=invite]');
+      if (inp) inp.value = '';
+    }
+    if (signup && /mời|email|mật khẩu/i.test(e.message)) {
+      signupStep(1);
+      err.textContent = e.message;
+    }
   } finally {
     btn.disabled = false;
     btn.classList.remove('loading');
@@ -736,6 +777,12 @@ function renderView() {
   hydrateMedia(view);
   if (inChat) hydrateChatBg();
   if (r.name === 'week') afterWeekRender();
+  if (r.name === 'settings' && !isNy() && !state.invite) {
+    ensureInvite().then((code) => {
+      const el = document.getElementById('invite-code');
+      if (el && code) el.textContent = code;
+    });
+  }
   if (r.name === 'settings' && state.scrollToProfile) {
     state.scrollToProfile = false;
     requestAnimationFrame(() => document.getElementById('pf-settings')?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
@@ -761,14 +808,108 @@ function renderView() {
 }
 
 // ============================================================ LỊCH ĂN
-function waitingCard(text = 'Gửi link app và mã mời cho người ấy để bắt đầu theo dõi giờ ăn nha.') {
+function waitingCard(text = 'Gửi link mời cho người ấy, bấm vào là tạo tài khoản được luôn để bắt đầu theo dõi giờ ăn nha.') {
   return `
     <div class="card invite-card">
       ${cat({ size: 64, mood: 'hungry' })}
       <div><b>Đang chờ Ny vào app 💌</b>
       <small>${text}</small>
-      <button class="btn small primary" data-action="copy-link">Sao chép link app</button></div>
+      ${isNy() ? '' : `<button class="btn small primary" data-action="share-invite">🔗 Gửi link mời</button>`}</div>
     </div>`;
+}
+
+// ============================================================ chủ app: link mời & quản lí tài khoản
+function inviteUrl(code) {
+  return `${location.origin}${location.pathname}?moi=${encodeURIComponent(code)}`;
+}
+
+async function ensureInvite() {
+  if (state.invite) return state.invite;
+  try {
+    state.invite = await api.ownerInvite();
+  } catch { /* để trống */ }
+  return state.invite;
+}
+
+async function shareInvite() {
+  const code = await ensureInvite();
+  if (!code) return toast('Chưa lấy được mã mời, thử lại nha', 'error');
+  const url = inviteUrl(code);
+  const text = `Vào app "${state.settings?.app_name || 'Bé ăn chưa?'}" với ${ownerName()} nha 💕 Bấm link là tạo tài khoản được luôn, không cần mã mời:`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Bé ăn chưa? 🐱', text, url });
+      return;
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(`${text} ${url}`);
+    toast('Đã sao chép link mời, dán gửi cho người ấy nha 📋');
+  } catch {
+    prompt('Sao chép link này gửi cho người ấy nha:', url);
+  }
+}
+
+function adminCardHtml() {
+  const ps = people();
+  const code = state.invite;
+  return `
+    <div class="card form-card admin-card">
+      <h3>👑 Quản lí của ${esc(ownerName())}</h3>
+      <p class="hint">App cho tối đa 2 tài khoản · đang có <b>${ps.length}/2</b></p>
+      <div class="member-list">
+        ${ps.map((p, i) => `
+          <div class="member-row">
+            <span class="mr-av">${esc(p.avatar)}</span>
+            <div class="mr-main"><b>${esc(p.display_name)}${p.id === state.uid ? ' (anh)' : ''}</b>
+              <small>${i === 0 ? '👑 Chủ app' : '🐷 Ny'} · vào app ${p.created_at ? fmtDmy(ymd(new Date(p.created_at))) : ''}</small>
+              ${p.email ? `<small class="mr-email">✉️ ${esc(p.email)}</small>` : ''}</div>
+            ${i > 0 ? `<button class="btn small ghost danger" data-kick="${p.id}">🚪 Đuổi</button>` : ''}
+          </div>`).join('')}
+      </div>
+      <div class="invite-box">
+        <div class="ib-code"><small>Mã mời hiện tại</small><b id="invite-code">${code ? esc(code) : '…'}</b></div>
+        <button class="btn small ghost" data-action="rotate-invite">🔄 Đổi mã</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary grow" data-action="share-invite">🔗 Chia sẻ link mời</button>
+        <button class="btn ghost" data-action="copy-invite">📋 Chép</button>
+      </div>
+      <p class="hint">${ps.length >= 2
+        ? 'App đủ 2 người rồi. Link mời chỉ dùng được khi còn chỗ trống (ví dụ sau khi đuổi một tài khoản vào nhầm).'
+        : 'Người được mời bấm link là tạo tài khoản được luôn, không cần nhập mã. Đổi mã thì link cũ hết dùng được.'}</p>
+    </div>`;
+}
+
+function openKickSheet(id) {
+  const p = state.profiles.get(id);
+  if (!p) return;
+  openOverlay('info', `
+    <div class="sheet kick-sheet">
+      <div class="grab"></div>
+      <div class="center"><span class="kick-av">${esc(p.avatar)}</span></div>
+      <h3 class="center">Đuổi ${esc(p.display_name)} khỏi app?</h3>
+      <p class="hint">Tài khoản này${p.email ? ` (${esc(p.email)})` : ''} và mọi thứ của nó: hình bữa ăn, tin nhắn đã gửi, lịch học, chu kỳ… sẽ bị <b>xoá vĩnh viễn</b>. Chỗ trống được mở lại để mời người khác.</p>
+      <label class="switch-row"><span>Đổi mã mời luôn (link mời cũ hết dùng được)</span>
+        <input type="checkbox" id="kick-rotate" checked><i class="switch"></i></label>
+      <div class="btn-row">
+        <button type="button" class="btn ghost" data-action="close-overlay">Thôi</button>
+        <button type="button" class="btn primary danger-fill grow" data-action="do-kick" data-id="${p.id}">🚪 Đuổi luôn</button>
+      </div>
+    </div>`);
+}
+
+function kickedOut() {
+  state.unsubscribe?.();
+  state.uid = null;
+  api.signOut().catch(() => {});
+  teardown();
+  app.innerHTML = `<div class="center-screen">${cat({ size: 110, mood: 'sleep' })}
+    <h2>Tài khoản này đã bị xoá khỏi app 😿</h2>
+    <p class="muted">Chủ app đã mời tài khoản này ra ngoài. Nếu nhầm thì nhờ chủ app gửi lại link mời nha.</p>
+    <button class="btn primary" data-auth-mode="login">Về trang đăng nhập</button></div>`;
 }
 
 function cyclePill() {
@@ -2066,6 +2207,7 @@ function viewSettings() {
 
   return `
     <h2 class="page-title"><a href="#/" class="back-link">${ICONS.left}</a> Cài đặt ⚙️</h2>
+    ${isNy() ? '' : adminCardHtml()}
 
     <div class="card form-card" id="profile-card">
       <h3>Hồ sơ của mình</h3>
@@ -2663,6 +2805,10 @@ document.addEventListener('click', async (e) => {
     location.hash = t.dataset.week === weekStartOf(ymd(new Date())) ? '#/week' : `#/week/${t.dataset.week}`;
     return;
   }
+  if (t.dataset.kick) {
+    openKickSheet(t.dataset.kick);
+    return;
+  }
   if (t.dataset.schedTime) {
     const [week, day, slot] = t.dataset.schedTime.split('|');
     openTimeSheet(week, Number(day), Number(slot));
@@ -2896,6 +3042,53 @@ document.addEventListener('click', async (e) => {
         renderView();
       }
       break;
+    case 'share-invite':
+      shareInvite();
+      break;
+    case 'copy-invite': {
+      const code = await ensureInvite();
+      if (!code) return toast('Chưa lấy được mã mời, thử lại nha', 'error');
+      try {
+        await navigator.clipboard.writeText(inviteUrl(code));
+        toast('Đã chép link mời 📋');
+      } catch {
+        prompt('Sao chép link này gửi cho người ấy nha:', inviteUrl(code));
+      }
+      break;
+    }
+    case 'rotate-invite': {
+      if (!confirm('Đổi mã mời mới? Link mời cũ sẽ hết dùng được.')) return;
+      try {
+        state.invite = await api.rotateInvite();
+        const el = document.getElementById('invite-code');
+        if (el) el.textContent = state.invite;
+        toast(`Mã mời mới: ${state.invite} 🔄`);
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+      break;
+    }
+    case 'do-kick': {
+      const id = t.dataset.id;
+      const name = state.profiles.get(id)?.display_name || 'tài khoản này';
+      if (!confirm(`Đuổi ${name} thật luôn hả? Không lấy lại được đâu nha.`)) return;
+      const rotate = document.getElementById('kick-rotate')?.checked !== false;
+      t.disabled = true;
+      t.textContent = 'Đang đuổi…';
+      try {
+        const r = await api.kickMember(id, rotate);
+        if (r.invite) state.invite = r.invite;
+        closeOverlay();
+        await loadData();
+        toast(`Đã đuổi ${name} khỏi app 🚪`, 'ok', 3500);
+        renderView();
+      } catch (err) {
+        toast(err.message, 'error', 4500);
+        t.disabled = false;
+        t.textContent = '🚪 Đuổi luôn';
+      }
+      break;
+    }
     case 'copy-link': {
       const url = location.origin + location.pathname;
       try {

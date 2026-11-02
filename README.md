@@ -2,7 +2,7 @@
 
 App nhỏ cho hai đứa mình: theo dõi giờ ăn của Ny, nhắn tin riêng và lịch "chị 🍓". Chỉ hai tài khoản (có mã mời) xem được. Người tạo tài khoản đầu tiên là **chủ app**, người thứ hai là **Ny**.
 
-## Tính năng (bản 2.2)
+## Tính năng (bản 2.3)
 - **Lịch ăn** (tab trái): ba bữa chính của Ny theo giờ ăn chuẩn (mặc định 07:30 · 12:00 · 19:00, đổi trong Cài đặt)
   - Mỗi bữa hiện giờ đăng hình và trễ/sớm bao lâu so với giờ ăn
   - Quá giờ chưa có hình: thẻ **báo đỏ** kèm số phút trễ; ngày đã qua mà thiếu hình: "Bỏ bữa"
@@ -20,6 +20,8 @@ App nhỏ cho hai đứa mình: theo dõi giờ ăn của Ny, nhắn tin riêng 
 - **Buzz**: chủ app bấm "🔔 Buzzz" ở từng bữa để nhắc Ny bất cứ lúc nào (thông báo + rung + mèo kêu nếu Ny đang mở app)
 - **Hình nền tin nhắn**: 8 nền có sẵn hoặc ảnh của mình (mỗi người tự chọn)
 - **Tiếng mèo kêu** khi có tin nhắn, buzz, nhắc giờ ăn lúc app đang mở (`sounds/`)
+- **Link mời**: chủ app bấm "Chia sẻ link mời" trong Cài đặt, người được mời bấm link là tạo tài khoản được luôn, không cần nhập mã
+- **Quản lí của chủ app** (Cài đặt): xem 2 tài khoản, đổi mã mời, **đuổi** tài khoản vào nhầm (xoá tài khoản + dữ liệu, mở lại chỗ trống)
 - Thông báo đẩy trên iPhone (cần thêm vào MH chính) và Android; cài như app
 
 ## Cấu trúc
@@ -34,12 +36,14 @@ supabase/chat.sql              Bản 1.1: bảng tin nhắn, liên kết nhắc 
 supabase/v2.sql                Bản 2.0: giờ ăn chuẩn, tin nhắn ảnh/video, tim trong chat, chu kỳ chị 🍓
 supabase/v2_1.sql              Bản 2.1: hồ sơ (ngày sinh, sở thích), hình nền tin nhắn, buzz, thẻ sự kiện
 supabase/v2_2.sql              Bản 2.2: bảng lịch học & làm việc theo tuần
+supabase/v2_3.sql              Bản 2.3: chủ app xem/đổi mã mời (link mời)
 supabase/functions/notify/     Edge Function gửi Web Push (WebCrypto, không thư viện ngoài)
+supabase/functions/admin/      Edge Function cho chủ app: đuổi tài khoản
 ```
 
 ## Dựng lại từ đầu
-1. Tạo project Supabase (gói Free, vùng Singapore), chạy lần lượt `supabase/schema.sql`, `supabase/chat.sql`, `supabase/v2.sql`, `supabase/v2_1.sql`, `supabase/v2_2.sql`.
-2. Deploy function `supabase/functions/notify` với **verify_jwt = false**.
+1. Tạo project Supabase (gói Free, vùng Singapore), chạy lần lượt `supabase/schema.sql`, `supabase/chat.sql`, `supabase/v2.sql`, `supabase/v2_1.sql`, `supabase/v2_2.sql`, `supabase/v2_3.sql`.
+2. Deploy hai function `supabase/functions/notify` và `supabase/functions/admin` với **verify_jwt = false**.
 3. Chạy `supabase/setup.sql` (thay `__REF__`, `__SITE__`, `__INVITE__`).
 4. Authentication → Sign In / Providers → Email → tắt **Confirm email**.
 5. Điền `SUPABASE_URL` và khoá publishable vào `js/config.js`, đẩy lên GitHub, bật GitHub Pages (nhánh `main`, thư mục gốc).

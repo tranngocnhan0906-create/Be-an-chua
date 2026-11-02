@@ -4,7 +4,7 @@ import { CONFIG } from './config.js';
 
 const BUCKET = 'meals';
 const MSG_COLS = 'id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,media_type,media_path,thumb_path,width,height,duration,bytes,created_at,read_at';
-const PROFILE_COLS = 'id,display_name,avatar,created_at,birthday,info,chat_bg';
+const PROFILE_COLS = 'id,email,display_name,avatar,created_at,birthday,info,chat_bg';
 const SCHED_COLS = 'id,user_id,week_start,weekday,slot,start_time,end_time,content,updated_at';
 const SIGNED_TTL = 7 * 24 * 3600; // link ảnh có hạn 7 ngày
 const SIGNED_CACHE_KEY = 'bac-signed-v1';
@@ -269,6 +269,36 @@ export const api = {
         ...(s ? { Authorization: `Bearer ${s.access_token}` } : {}),
       },
       body: JSON.stringify({ type, ...extra }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || `Lỗi máy chủ (${res.status})`);
+    return j;
+  },
+
+  // ---------- Việc của chủ app ----------
+  async ownerInvite() {
+    const { data, error } = await sb.rpc('owner_invite');
+    if (error) throw new Error(error.message);
+    return data || null;
+  },
+
+  async rotateInvite() {
+    const { data, error } = await sb.rpc('rotate_invite');
+    if (error) throw new Error(/NOT_OWNER/.test(error.message) ? 'Chỉ chủ app mới đổi được mã mời' : error.message);
+    return data;
+  },
+
+  /** Đuổi một tài khoản khỏi app (xoá tài khoản và dữ liệu của tài khoản đó) */
+  async kickMember(target, rotate = true) {
+    const s = await session();
+    const res = await fetch(`${CONFIG.FUNCTIONS_URL}/admin`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: CONFIG.SUPABASE_KEY,
+        ...(s ? { Authorization: `Bearer ${s.access_token}` } : {}),
+      },
+      body: JSON.stringify({ type: 'kick', target, rotate }),
     });
     const j = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(j.error || `Lỗi máy chủ (${res.status})`);
