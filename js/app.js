@@ -1,4 +1,4 @@
-// Bé ăn chưa? — bản 2.1: Lịch ăn của Ny · Tin nhắn · Chị 🍓 · hồ sơ hai đứa
+// Bé ăn chưa? — bản 2.2: Lịch ăn · Lịch học · Tin nhắn · Chị 🍓 · Hai đứa
 import { api } from './api.js';
 import { CONFIG } from './config.js';
 import {
@@ -7,7 +7,7 @@ import {
   monthTitle, addMonths, daysInMonth, weekdayOf, esc, fmtBytes, uuid, computeStreak, loveInfo,
   isIOS, isAndroid, isStandalone, ymd,
   schedMinutes, fmtHM, schedDate, fmtDur, lateInfo, cyclePredict, cycleStatus, cycleDayKinds,
-  nextBirthday, ageOf, zodiacOf,
+  nextBirthday, ageOf, zodiacOf, WEEKDAY_LABELS, isoWeekday, weekStartOf,
 } from './util.js';
 import { processFile, processImage } from './media.js';
 import { cat, ICONS } from './art.js';
@@ -61,6 +61,7 @@ const state = {
   heartById: new Map(),
   messages: new Map(),
   cycles: new Map(),
+  schedule: new Map(), // lịch học/làm của Ny
   route: { name: 'day', date: null },
   loadedAt: 0,
   unsubscribe: null,
@@ -118,7 +119,7 @@ function teardown() {
   state.unsubscribe?.();
   Object.assign(state, {
     unsubscribe: null, uid: null, profiles: new Map(), meals: new Map(), hearts: new Map(), heartById: new Map(),
-    messages: new Map(), cycles: new Map(), settings: null, overlay: null, loadedAt: 0,
+    messages: new Map(), cycles: new Map(), schedule: new Map(), settings: null, overlay: null, loadedAt: 0,
   });
 }
 
@@ -164,6 +165,7 @@ async function loadData() {
   for (const r of d.reactions) addHeartState(r);
   state.messages = new Map((d.messages || []).map((m) => [m.id, m]));
   state.cycles = new Map((d.cycles || []).map((c) => [c.id, c]));
+  state.schedule = new Map((d.schedule || []).map((r) => [r.id, r]));
   state.loadedAt = Date.now();
   document.title = state.settings.app_name || 'Bé ăn chưa?';
 }
@@ -229,6 +231,15 @@ function onDbChange(table, p) {
   } else if (table === 'cycles') {
     if (p.eventType === 'DELETE') state.cycles.delete(o.id);
     else if (n.id) state.cycles.set(n.id, { ...(state.cycles.get(n.id) || {}), ...n });
+  } else if (table === 'schedule_items') {
+    if (p.eventType === 'DELETE') state.schedule.delete(o.id);
+    else if (n.id) {
+      // ô vừa lưu từ máy khác có thể trùng tuần-thứ-ô với bản tạm trong máy này
+      for (const [k, r] of state.schedule) {
+        if (k !== n.id && r.user_id === n.user_id && r.week_start === n.week_start && r.weekday === n.weekday && r.slot === n.slot) state.schedule.delete(k);
+      }
+      state.schedule.set(n.id, { ...(state.schedule.get(n.id) || {}), ...n });
+    }
   }
   scheduleRender();
 }
@@ -626,12 +637,14 @@ function renderShell() {
     <a class="me-chip" href="#/settings" aria-label="Cài đặt"><span class="me-av">${esc(avatarOf(state.uid))}</span><span class="me-gear">${ICONS.gear}</span></a>
   </header>
   <main id="view" class="view"></main>
-  <nav class="tabbar three" aria-label="Điều hướng">
+  <nav class="tabbar five" aria-label="Điều hướng">
     <a href="#/" data-tab="day" class="tab">${ICONS.bowl}<span>Lịch ăn</span></a>
+    <a href="#/week" data-tab="week" class="tab">${ICONS.book}<span>Lịch học</span></a>
     <a href="#/chat" data-tab="chat" class="tab-center" aria-label="Tin nhắn">
       <span class="tc-bubble">${ICONS.chat}<i class="tab-badge" hidden></i></span><span>Tin nhắn</span>
     </a>
     <a href="#/cycle" data-tab="cycle" class="tab">${ICONS.cycle}<span>Chị 🍓</span></a>
+    <a href="#/us" data-tab="us" class="tab">${ICONS.heart}<span>Hai đứa</span></a>
   </nav>
   <div id="chatbar" class="chatbar" hidden>
     <div class="quick" id="quick"></div>
@@ -658,6 +671,7 @@ function parseRoute() {
   if (a === 'settings') return { name: 'settings' };
   if (a === 'chat') return { name: 'chat' };
   if (a === 'cycle') return { name: 'cycle' };
+  if (a === 'week') return { name: 'week', week: /^\d{4}-\d{2}-\d{2}$/.test(b || '') ? weekStartOf(b) : null };
   if (a === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(b || '')) return { name: 'day', date: b };
   if (a === 'p' && b) return { name: 'post', id: b };
   if (a === 'm' && b) return { name: 'media', id: b };
@@ -689,7 +703,7 @@ function onRoute() {
 }
 
 function tabOf(name) {
-  if (name === 'cal' || name === 'us') return 'day';
+  if (name === 'cal') return 'day';
   return name;
 }
 
@@ -708,6 +722,7 @@ function renderView() {
   else if (r.name === 'us') view.innerHTML = viewUs();
   else if (r.name === 'settings') view.innerHTML = viewSettings();
   else if (r.name === 'cycle') view.innerHTML = viewCycle();
+  else if (r.name === 'week') view.innerHTML = viewWeek();
   else if (inChat) view.innerHTML = viewChat();
   else view.innerHTML = viewDay();
   const tab = tabOf(r.name);
@@ -720,6 +735,7 @@ function renderView() {
   document.body.classList.toggle('chat-dark', inChat && !!BG_PRESETS.find((b) => b.key === chatBgKey())?.dark);
   hydrateMedia(view);
   if (inChat) hydrateChatBg();
+  if (r.name === 'week') afterWeekRender();
   if (r.name === 'settings' && state.scrollToProfile) {
     state.scrollToProfile = false;
     requestAnimationFrame(() => document.getElementById('pf-settings')?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
@@ -893,6 +909,7 @@ function viewDay() {
     <div class="pills">
       <a class="pill" href="#/cal/${date.slice(0, 7)}">📅 Cả tháng</a>
       ${streak ? `<a class="pill streak" href="#/us">🔥 Ăn đủ bữa <b>${streak.current}</b> ngày</a>` : ''}
+      ${hasNy ? schedPill() : ''}
       ${hasNy ? cyclePill() : ''}
     </div>`;
 
@@ -1074,13 +1091,264 @@ function viewUs() {
     .sort((a, b) => (heartCount(b.id) * 2 + commentCount(b.id)) - (heartCount(a.id) * 2 + commentCount(a.id)) || b.created_at.localeCompare(a.created_at))
     .slice(0, 6);
   return `
-    <h2 class="page-title"><a href="#/" class="back-link">${ICONS.left}</a> Hai đứa mình 💞</h2>
+    <h2 class="page-title">Hai đứa mình 💞</h2>
     ${loveCard}
     ${nyId() ? profileCardHtml(ny(), '🐷 Ny của app') : ''}
     ${profileCardHtml(owner(), '👑 Chủ app')}
     ${nyCard}
     ${loved.length ? `<div class="card"><h3>Được thương nhiều nhất 💗</h3><div class="post-row wrap">${loved.map((m) => postCard(m)).join('')}</div></div>` : ''}
     <div class="bottom-space"></div>`;
+}
+
+// ============================================================ LỊCH HỌC & LÀM VIỆC
+const DEFAULT_SLOTS = [
+  { label: 'Sáng', start: '07:30', end: '11:30' },
+  { label: 'Chiều', start: '13:30', end: '17:00' },
+  { label: 'Tối', start: '18:30', end: '21:00' },
+];
+const hm = (t) => (t ? String(t).slice(0, 5) : '');
+const nowHM = () => {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+function schedRows(week) {
+  return [...state.schedule.values()].filter((r) => r.user_id === nyId() && r.week_start === week);
+}
+
+/** Các dòng của một ngày: 3 ô Sáng/Chiều/Tối (chưa điền thì là ô trống) + các dòng thêm, xếp theo giờ */
+function dayRows(week, day) {
+  const saved = schedRows(week).filter((r) => r.weekday === day);
+  const bySlot = new Map(saved.map((r) => [r.slot, r]));
+  const rows = DEFAULT_SLOTS.map((d, i) => bySlot.get(i) || {
+    placeholder: true, weekday: day, slot: i, start_time: d.start, end_time: d.end, content: '',
+  });
+  for (const r of saved) if (r.slot >= DEFAULT_SLOTS.length) rows.push(r);
+  return rows.sort((a, b) => (hm(a.start_time) || '99').localeCompare(hm(b.start_time) || '99') || a.slot - b.slot);
+}
+
+/** Hôm nay bé đang làm gì / sắp làm gì */
+function schedToday() {
+  const today = ymd(new Date());
+  const week = weekStartOf(today);
+  const list = dayRows(week, isoWeekday(today)).filter((r) => !r.placeholder && r.content.trim() && hm(r.start_time));
+  const t = nowHM();
+  const cur = list.find((r) => hm(r.end_time) && t >= hm(r.start_time) && t < hm(r.end_time));
+  const next = list.find((r) => hm(r.start_time) > t);
+  return { list, cur, next, weekFilled: schedRows(week).some((r) => r.content.trim()) };
+}
+
+function schedPill() {
+  const { cur } = schedToday();
+  if (!cur) return '';
+  const text = cur.content.length > 26 ? `${cur.content.slice(0, 25)}…` : cur.content;
+  return `<a class="pill sched" href="#/week">📚 ${isNy() ? 'Đang' : `${esc(nyName())} đang`}: ${esc(text)}</a>`;
+}
+
+function weekLabel(week, thisWeek) {
+  if (week === thisWeek) return 'Tuần này';
+  if (week === addDays(thisWeek, 7)) return 'Tuần sau';
+  if (week === addDays(thisWeek, -7)) return 'Tuần trước';
+  return `Tuần ${fmtDmy(week).slice(0, 5)}`;
+}
+
+function schedCellAttrs(week, r) {
+  return `data-sw="${week}" data-sd="${r.weekday}" data-ss="${r.slot}"`;
+}
+
+function viewWeek() {
+  if (!nyId()) {
+    return `<h2 class="page-title">📚 Lịch học & làm</h2>${waitingCard('Khi Ny vào app, lịch học và làm việc trong tuần của Ny sẽ hiện ở đây.')}<div class="bottom-space"></div>`;
+  }
+  const today = ymd(new Date());
+  const thisWeek = weekStartOf(today);
+  const week = state.route.week || thisWeek;
+  const edit = isNy();
+  const N = esc(nyName());
+  const filled = schedRows(week).filter((r) => r.content.trim()).length;
+
+  // thẻ "bây giờ" cho tuần này
+  let nowCard = '';
+  if (week === thisWeek) {
+    const { list, cur, next } = schedToday();
+    let icon = '🌿';
+    let text;
+    if (cur) {
+      icon = '🔴';
+      text = `${edit ? 'Bây giờ' : `Bây giờ ${N} đang`}: <b>${esc(cur.content)}</b><small>${hm(cur.start_time)} – ${hm(cur.end_time)}</small>`;
+    } else if (next) {
+      icon = '⏭️';
+      text = `Tiếp theo lúc ${hm(next.start_time)}: <b>${esc(next.content)}</b>`;
+    } else if (list.length) {
+      icon = '🎉';
+      text = 'Hôm nay xong lịch rồi, nghỉ ngơi thôi';
+    } else if (filled) {
+      text = 'Hôm nay không có lịch, rảnh rỗi nè';
+    } else {
+      icon = '📭';
+      text = edit ? `Điền lịch tuần này cho ${esc(ownerName())} biết nha` : `${N} chưa điền lịch tuần này`;
+    }
+    nowCard = `
+      <div class="card now-card">
+        <span class="now-ico">${icon}</span>
+        <div class="now-text">${text}</div>
+        ${!edit && !filled ? `<button class="btn small primary" data-action="sched-nudge">Nhắc bé</button>` : ''}
+      </div>`;
+  }
+
+  const prev = schedRows(addDays(week, -7)).filter((r) => r.content.trim());
+  const copyBtn = edit && !filled && prev.length
+    ? `<button class="btn ghost block copy-week" data-action="sched-copy">📋 Chép lịch tuần trước (${prev.length} dòng)</button>` : '';
+
+  let body = '';
+  for (let day = 1; day <= 7; day++) {
+    const date = addDays(week, day - 1);
+    const isToday = date === today;
+    let list = dayRows(week, day);
+    if (!edit) list = list.filter((r) => !r.placeholder && (r.content.trim() || hm(r.start_time)));
+    const dayHead = (span) => `<th rowspan="${span}" class="day-cell"><b>${WEEKDAY_LABELS[day - 1]}</b><small>${fmtDmy(date).slice(0, 5)}</small>${isToday ? '<i>Hôm nay</i>' : ''}</th>`;
+    if (!list.length) {
+      body += `<tr class="day-first ${isToday ? 'today' : ''}">${dayHead(1)}<td class="time-cell muted">—</td><td class="content-cell"><span class="sc-empty">Chưa có lịch</span></td></tr>`;
+      continue;
+    }
+    const span = list.length + (edit ? 1 : 0);
+    list.forEach((r, i) => {
+      const live = isToday && r.content && hm(r.start_time) && hm(r.end_time) && nowHM() >= hm(r.start_time) && nowHM() < hm(r.end_time);
+      const hmHtml = `<span class="sc-hm">${hm(r.start_time) || '--:--'}</span><span class="sc-hm end">${hm(r.end_time) || (edit ? 'thêm giờ' : '')}</span>`;
+      const time = edit
+        ? `<button type="button" class="sc-timebtn ${r.placeholder ? 'ph' : ''}" data-sched-time="${week}|${r.weekday}|${r.slot}" aria-label="Sửa giờ">${hmHtml}</button>`
+        : hmHtml;
+      const ph = DEFAULT_SLOTS[r.slot] ? `Buổi ${DEFAULT_SLOTS[r.slot].label.toLowerCase()} làm gì nè?` : 'Làm gì nè?';
+      const content = edit
+        ? `<textarea class="sc-input ${r.placeholder ? 'ph' : ''}" rows="1" maxlength="300" placeholder="${ph}" ${schedCellAttrs(week, r)}>${esc(r.content)}</textarea>
+           ${r.placeholder ? '' : `<button type="button" class="sc-del" data-sched-del="${r.id}" aria-label="Xoá dòng">✕</button>`}`
+        : `<div class="sc-text">${r.content.trim() ? esc(r.content) : '<span class="sc-empty">—</span>'}</div>`;
+      body += `
+        <tr class="${i === 0 ? 'day-first' : ''} ${isToday ? 'today' : ''} ${live ? 'live' : ''}">
+          ${i === 0 ? dayHead(span) : ''}
+          <td class="time-cell">${time}</td>
+          <td class="content-cell">${content}${live ? '<span class="live-tag">● đang diễn ra</span>' : ''}</td>
+        </tr>`;
+    });
+    if (edit) body += `<tr class="add-row ${isToday ? 'today' : ''}"><td colspan="2"><button type="button" class="link-btn" data-sched-add="${week}|${day}">+ Thêm dòng</button></td></tr>`;
+  }
+
+  return `
+    <h2 class="page-title">📚 Lịch học & làm</h2>
+    <div class="week-head">
+      <button class="icon-btn" data-week="${addDays(week, -7)}" aria-label="Tuần trước">${ICONS.left}</button>
+      <div class="week-title"><b>${weekLabel(week, thisWeek)}</b><small>${fmtDmy(week).slice(0, 5)} – ${fmtDmy(addDays(week, 6))}</small></div>
+      <button class="icon-btn" data-week="${addDays(week, 7)}" aria-label="Tuần sau">${ICONS.right}</button>
+    </div>
+    ${week !== thisWeek ? `<div class="back-today"><a class="pill" href="#/week">↩ Về tuần này</a></div>` : ''}
+    ${nowCard}
+    ${copyBtn}
+    <div class="card sched-card">
+      <table class="sched-table">
+        <thead><tr><th>Thứ</th><th>Thời gian</th><th>Làm gì</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+    <p class="hint center">${edit ? `Điền xong ô nào là lưu ô đó, ${esc(ownerName())} xem được liền 💕` : `Lịch do ${N} tự điền. Đổi tuần bằng ‹ ›`}</p>
+    <div class="bottom-space"></div>`;
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight + 2}px`;
+}
+
+function afterWeekRender() {
+  document.querySelectorAll('.sc-input').forEach(autoGrow);
+  if (state.focusSched) {
+    const el = document.querySelector(`.sc-input[data-sw="${state.focusSched.week}"][data-sd="${state.focusSched.day}"][data-ss="${state.focusSched.slot}"]`);
+    state.focusSched = null;
+    if (el) {
+      el.focus();
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+}
+
+function findSched(week, day, slot) {
+  return [...state.schedule.values()].find((r) => r.user_id === state.uid && r.week_start === week && r.weekday === day && r.slot === slot);
+}
+
+async function saveSched(week, day, slot, patch) {
+  const found = findSched(week, day, slot);
+  const def = DEFAULT_SLOTS[slot] || {};
+  const row = {
+    user_id: state.uid,
+    week_start: week,
+    weekday: day,
+    slot,
+    start_time: found ? found.start_time : def.start || null,
+    end_time: found ? found.end_time : def.end || null,
+    content: found ? found.content : '',
+    ...patch,
+    updated_at: new Date().toISOString(),
+  };
+  if (!row.start_time) row.start_time = null;
+  if (!row.end_time) row.end_time = null;
+  try {
+    const [saved] = await api.saveSchedule(row);
+    if (found && found.id !== saved.id) state.schedule.delete(found.id);
+    state.schedule.set(saved.id, saved);
+    toast('Đã lưu ✓', 'ok', 1200);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  scheduleRender();
+}
+
+const TIME_PRESETS = [
+  { label: 'Sáng', start: '07:30', end: '11:30' },
+  { label: 'Chiều', start: '13:30', end: '17:00' },
+  { label: 'Tối', start: '18:30', end: '21:00' },
+  { label: 'Hành chính', start: '08:00', end: '17:00' },
+];
+
+function openTimeSheet(week, day, slot) {
+  const r = findSched(week, day, slot) || { start_time: DEFAULT_SLOTS[slot]?.start || '', end_time: DEFAULT_SLOTS[slot]?.end || '' };
+  openOverlay('info', `
+    <div class="sheet time-sheet">
+      <div class="grab"></div>
+      <h3>⏰ Giờ · ${WEEKDAY_LABELS[day - 1]} ${fmtDmy(addDays(week, day - 1)).slice(0, 5)}</h3>
+      <div class="num-grid">
+        <label class="field"><span>Bắt đầu</span><input type="time" id="ts-start" value="${hm(r.start_time)}"></label>
+        <label class="field"><span>Kết thúc</span><input type="time" id="ts-end" value="${hm(r.end_time)}"></label>
+      </div>
+      <div class="chips">${TIME_PRESETS.map((p) => `<button type="button" class="chip" data-tpreset="${p.start}|${p.end}">${p.label} ${p.start}–${p.end}</button>`).join('')}</div>
+      <div class="btn-row">
+        <button type="button" class="btn ghost" data-action="close-overlay">Huỷ</button>
+        <button type="button" class="btn primary grow" data-action="save-time" data-target="${week}|${day}|${slot}">Lưu giờ</button>
+      </div>
+    </div>`);
+}
+
+async function addSchedRow(week, day) {
+  const used = [...state.schedule.values()].filter((r) => r.user_id === state.uid && r.week_start === week && r.weekday === day).map((r) => r.slot);
+  const slot = Math.max(DEFAULT_SLOTS.length - 1, ...used) + 1;
+  if (slot > 30) return toast('Ngày này nhiều dòng quá rồi nè 😵', 'error');
+  state.focusSched = { week, day, slot };
+  await saveSched(week, day, slot, { start_time: null, end_time: null, content: '' });
+}
+
+async function copyLastWeek() {
+  const week = state.route.week || weekStartOf(ymd(new Date()));
+  const prev = schedRows(addDays(week, -7)).filter((r) => r.content.trim());
+  if (!prev.length) return;
+  try {
+    const saved = await api.saveSchedule(prev.map((r) => ({
+      user_id: state.uid, week_start: week, weekday: r.weekday, slot: r.slot,
+      start_time: r.start_time, end_time: r.end_time, content: r.content, updated_at: new Date().toISOString(),
+    })));
+    for (const r of saved) state.schedule.set(r.id, r);
+    toast(`Đã chép ${saved.length} dòng từ tuần trước 📋`);
+    renderView();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 // ============================================================ CHỊ 🍓
@@ -1985,6 +2253,7 @@ function baseHash() {
   const r = state.route;
   if (r.name === 'cal') return `#/cal${r.month ? '/' + r.month : ''}`;
   if (['us', 'settings', 'chat', 'cycle'].includes(r.name)) return `#/${r.name}`;
+  if (r.name === 'week') return r.week ? `#/week/${r.week}` : '#/week';
   return r.date ? `#/day/${r.date}` : '#/';
 }
 
@@ -2390,6 +2659,38 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (t.hasAttribute('data-goto-profile')) state.scrollToProfile = true;
+  if (t.dataset.week) {
+    location.hash = t.dataset.week === weekStartOf(ymd(new Date())) ? '#/week' : `#/week/${t.dataset.week}`;
+    return;
+  }
+  if (t.dataset.schedTime) {
+    const [week, day, slot] = t.dataset.schedTime.split('|');
+    openTimeSheet(week, Number(day), Number(slot));
+    return;
+  }
+  if (t.dataset.tpreset) {
+    const [a, b] = t.dataset.tpreset.split('|');
+    document.getElementById('ts-start').value = a;
+    document.getElementById('ts-end').value = b;
+    return;
+  }
+  if (t.dataset.schedAdd) {
+    const [week, day] = t.dataset.schedAdd.split('|');
+    addSchedRow(week, Number(day));
+    return;
+  }
+  if (t.dataset.schedDel) {
+    const row = state.schedule.get(t.dataset.schedDel);
+    if (row?.content.trim() && !confirm('Xoá dòng này nha?')) return;
+    try {
+      await api.deleteSchedule(t.dataset.schedDel);
+      state.schedule.delete(t.dataset.schedDel);
+      renderView();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    return;
+  }
   if (t.classList.contains('av-opt') && t.closest('.avatar-pick')) {
     t.closest('.avatar-pick').querySelectorAll('.av-opt').forEach((b) => b.classList.toggle('on', b === t));
     return;
@@ -2512,6 +2813,21 @@ document.addEventListener('click', async (e) => {
       break;
     case 'test-meow':
       meow('test', { force: true });
+      break;
+    case 'sched-copy':
+      copyLastWeek();
+      break;
+    case 'save-time': {
+      const [week, day, slot] = t.dataset.target.split('|');
+      const start = document.getElementById('ts-start').value || null;
+      const end = document.getElementById('ts-end').value || null;
+      closeOverlay();
+      await saveSched(week, Number(day), Number(slot), { start_time: start, end_time: end });
+      break;
+    }
+    case 'sched-nudge':
+      await sendChat(`📚 ${nyName()} ơi, điền lịch học với lịch làm tuần này cho ${ownerName()} biết với nha 🥺`);
+      toast('Đã nhắn nhắc 💌');
       break;
     case 'retry':
       location.reload();
@@ -2711,6 +3027,22 @@ document.addEventListener('submit', (e) => {
 
 document.addEventListener('change', (e) => {
   if (e.target.matches('input[data-pick]')) onPickFile(e.target);
+  if (e.target.matches('.sc-input, .sc-time')) {
+    const el = e.target;
+    const week = el.dataset.sw;
+    const day = Number(el.dataset.sd);
+    const slot = Number(el.dataset.ss);
+    const cur = findSched(week, day, slot);
+    if (el.classList.contains('sc-input')) {
+      const content = el.value.trim().slice(0, 300);
+      if (content === (cur?.content || '')) return;
+      saveSched(week, day, slot, { content });
+    } else {
+      const field = el.dataset.field;
+      if ((el.value || '') === hm(cur?.[field])) return;
+      saveSched(week, day, slot, { [field]: el.value || null });
+    }
+  }
   if (e.target.matches('input[data-bg-pick]')) {
     const f = e.target.files?.[0];
     e.target.value = '';
@@ -2733,6 +3065,7 @@ document.addEventListener('change', (e) => {
 });
 
 document.addEventListener('input', (e) => {
+  if (e.target.classList?.contains('sc-input')) autoGrow(e.target);
   if (e.target.id === 'c-caption' && state.composer) state.composer.caption = e.target.value;
   if (e.target.id === 'cmt-input') state.viewerDraft = e.target.value;
 });
@@ -2751,5 +3084,9 @@ document.addEventListener('pointerup', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && e.target.classList?.contains('sc-input')) {
+    e.preventDefault();
+    e.target.blur(); // Enter = lưu ô đang điền
+  }
   if (e.key === 'Escape' && state.overlay && !state.overlay.locked) closeOverlay();
 });

@@ -1043,3 +1043,76 @@ body.chat-dark .msg-status, body.chat-dark .chat-empty { color: var(--muted); }
 .bg-tile.on { border-color: var(--primary-strong); }
 .bg-tile.on::after { content: '✓'; position: absolute; top: 6px; right: 8px; width: 22px; height: 22px; border-radius: 50%; background: var(--primary-strong); color: #fff; display: grid; place-items: center; font-weight: 900; font-size: 13px; }
 .bg-upload { background-color: var(--primary-soft); background-size: cover; background-position: center; align-items: center; }
+
+/* ===================== Bản 2.2: tab Lịch học & làm việc ===================== */
+.tabbar.five { grid-template-columns: 1fr 1fr 92px 1fr 1fr; padding: 0 4px var(--safe-b); }
+.tabbar.five .tab { font-size: 11px; }
+.tabbar.five .tab svg { width: 24px; height: 24px; }
+@media (max-width: 380px) { .tabbar.five { grid-template-columns: 1fr 1fr 84px 1fr 1fr; } .tabbar.five .tab { font-size: 10.5px; } }
+.pill.sched { background: linear-gradient(135deg, #e4f6ec, #d3f0e1); color: #1f7a4f; }
+@media (prefers-color-scheme: dark) { .pill.sched { background: #1f3b2c; color: #9fe3bf; } }
+
+.week-head { display: grid; grid-template-columns: 42px 1fr 42px; align-items: center; gap: 8px; padding: 0 16px 10px; }
+.week-title { text-align: center; }
+.week-title b { display: block; font-family: var(--font-display); font-size: 24px; line-height: 1.1; color: var(--primary-strong); }
+.week-title small { color: var(--muted); font-weight: 700; font-size: 13.5px; }
+.now-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.now-ico { font-size: 26px; flex: none; }
+.now-text { flex: 1; min-width: 0; font-weight: 700; font-size: 15px; line-height: 1.4; }
+.now-text b { color: var(--ink); }
+.now-text small { display: block; color: var(--muted); font-size: 12.5px; }
+.copy-week { margin: 0 16px 14px; width: calc(100% - 32px); }
+
+.sched-card { padding: 6px 4px 8px; }
+.sched-table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.sched-table thead th {
+  font-size: 12px; color: var(--muted); font-weight: 800; text-align: left; padding: 6px 6px 8px;
+  text-transform: uppercase; letter-spacing: .3px;
+}
+.sched-table thead th:nth-child(1) { width: 66px; }
+.sched-table thead th:nth-child(2) { width: 96px; }
+.sched-table td, .sched-table tbody th { padding: 5px 5px; vertical-align: top; }
+.sched-table tr.day-first > * { border-top: 2px solid var(--line); padding-top: 8px; }
+.day-cell { text-align: left; font-weight: 400; }
+.day-cell b { display: block; font-size: 14.5px; font-weight: 900; }
+.day-cell small { display: block; color: var(--muted); font-weight: 700; font-size: 12px; }
+.day-cell i {
+  display: inline-block; margin-top: 4px; font-style: normal; font-size: 9.5px; font-weight: 900; color: #fff;
+  background: var(--primary-strong); border-radius: 999px; padding: 1px 5px; white-space: nowrap;
+}
+.sched-table tr.today > td, .sched-table tr.today > th { background: color-mix(in srgb, var(--primary-soft) 55%, transparent); }
+.sched-table tr.live > td { background: color-mix(in srgb, var(--green-soft) 80%, transparent); }
+.time-cell { font-weight: 800; font-size: 14px; }
+.sched-table .sc-time {
+  display: block; width: 100%; min-height: 36px; padding: 4px 4px; font-size: 16px; text-align: center;
+  border-radius: 10px; border: 1.5px solid var(--line); background: var(--card); color: var(--ink);
+}
+.sched-table .sc-time::-webkit-calendar-picker-indicator { display: none; }
+.sc-dash { display: block; text-align: center; font-size: 10.5px; font-weight: 800; color: var(--muted); line-height: 1.3; }
+.sc-hm { display: block; line-height: 1.35; }
+.sc-hm.end { color: var(--muted); font-weight: 700; font-size: 13px; }
+.content-cell { position: relative; }
+.sc-input {
+  display: block; width: 100%; min-height: 48px; resize: none; overflow: hidden; padding: 11px 26px 11px 10px;
+  border-radius: 12px; font-size: 16px; line-height: 1.35; border: 1.5px solid var(--line); background: var(--card);
+}
+.sc-input.ph { border-style: dashed; background: var(--bg); }
+.sc-input:focus { border-color: var(--primary); border-style: solid; background: var(--card); }
+.sc-del {
+  position: absolute; top: 9px; right: 9px; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--bg); color: var(--muted); font-size: 11px; font-weight: 900; display: grid; place-items: center;
+}
+.sc-text { white-space: pre-wrap; word-break: break-word; font-size: 15px; line-height: 1.4; padding: 2px 0; }
+.sc-empty { color: var(--muted); font-weight: 700; font-size: 13.5px; }
+.live-tag { display: block; color: var(--green); font-size: 11.5px; font-weight: 900; margin-top: 3px; }
+.add-row td { padding: 0 6px 8px; }
+.add-row .link-btn { font-size: 13.5px; text-decoration: none; }
+.sc-timebtn {
+  display: block; width: 100%; min-height: 48px; padding: 5px 4px; border-radius: 12px; text-align: center;
+  border: 1.5px solid var(--line); background: var(--card); font-weight: 800; font-size: 14px; color: var(--ink);
+}
+.sc-timebtn.ph { border-style: dashed; background: var(--bg); }
+.sc-timebtn:active { transform: scale(.96); }
+.sc-timebtn .sc-hm.end { font-size: 12.5px; }
+.time-sheet h3 { font-size: 20px; margin-bottom: 12px; }
+.time-sheet .chips { margin: 2px 0 14px; }

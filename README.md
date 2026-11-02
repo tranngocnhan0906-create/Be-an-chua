@@ -2,12 +2,13 @@
 
 App nhỏ cho hai đứa mình: theo dõi giờ ăn của Ny, nhắn tin riêng và lịch "chị 🍓". Chỉ hai tài khoản (có mã mời) xem được. Người tạo tài khoản đầu tiên là **chủ app**, người thứ hai là **Ny**.
 
-## Tính năng (bản 2.1)
+## Tính năng (bản 2.2)
 - **Lịch ăn** (tab trái): ba bữa chính của Ny theo giờ ăn chuẩn (mặc định 07:30 · 12:00 · 19:00, đổi trong Cài đặt)
   - Mỗi bữa hiện giờ đăng hình và trễ/sớm bao lâu so với giờ ăn
   - Quá giờ chưa có hình: thẻ **báo đỏ** kèm số phút trễ; ngày đã qua mà thiếu hình: "Bỏ bữa"
   - Đổi sang ngày khác bằng ‹ ›, xem cả tháng với chấm xanh/cam/đỏ và thống kê
   - Chỉ Ny chụp/đăng báo cáo; chủ app xem, thả tim, bình luận, bấm "🔔 Buzzz" nhắc từng bữa
+- **Lịch học** (tab thứ hai): bảng tuần của Ny — cột Thứ, cột Thời gian, cột Làm gì. Mỗi ngày có sẵn 3 ô Sáng/Chiều/Tối để Ny điền, sửa giờ, thêm dòng; đổi tuần ‹ ›, chép lịch tuần trước; anh xem được Ny đang làm gì lúc này
 - **Tin nhắn** (nút tròn ở giữa): chữ, ảnh, video; trả lời nhanh, đã xem, thu hồi
   - Mỗi bài báo cáo, lượt thả tim, bình luận ảnh bữa ăn đều hiện trong khung chat
   - Mèo nhắc giờ ăn ngay trong chat (trễ 15 phút và trễ 1 tiếng), có nút **Gửi báo cáo**
@@ -32,11 +33,12 @@ supabase/setup.sql             Cấu hình sau khi deploy: URL function, mã m�
 supabase/chat.sql              Bản 1.1: bảng tin nhắn, liên kết nhắc giờ ăn ↔ bài báo cáo
 supabase/v2.sql                Bản 2.0: giờ ăn chuẩn, tin nhắn ảnh/video, tim trong chat, chu kỳ chị 🍓
 supabase/v2_1.sql              Bản 2.1: hồ sơ (ngày sinh, sở thích), hình nền tin nhắn, buzz, thẻ sự kiện
+supabase/v2_2.sql              Bản 2.2: bảng lịch học & làm việc theo tuần
 supabase/functions/notify/     Edge Function gửi Web Push (WebCrypto, không thư viện ngoài)
 ```
 
 ## Dựng lại từ đầu
-1. Tạo project Supabase (gói Free, vùng Singapore), chạy lần lượt `supabase/schema.sql`, `supabase/chat.sql`, `supabase/v2.sql`, `supabase/v2_1.sql`.
+1. Tạo project Supabase (gói Free, vùng Singapore), chạy lần lượt `supabase/schema.sql`, `supabase/chat.sql`, `supabase/v2.sql`, `supabase/v2_1.sql`, `supabase/v2_2.sql`.
 2. Deploy function `supabase/functions/notify` với **verify_jwt = false**.
 3. Chạy `supabase/setup.sql` (thay `__REF__`, `__SITE__`, `__INVITE__`).
 4. Authentication → Sign In / Providers → Email → tắt **Confirm email**.

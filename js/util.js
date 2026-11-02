@@ -368,3 +368,16 @@ export function zodiacOf(bday) {
   for (const item of ZODIAC) if (md >= item[0]) z = item;
   return { icon: z[1], name: z[2] };
 }
+
+// ====================================================================== LỊCH TUẦN
+export const WEEKDAY_LABELS = ['Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7', 'Chủ nhật'];
+
+/** Thứ trong tuần kiểu Việt Nam: thứ 2 = 1 … chủ nhật = 7 */
+export function isoWeekday(dateStr) {
+  return ((weekdayOf(dateStr) + 6) % 7) + 1;
+}
+
+/** Ngày thứ 2 của tuần chứa dateStr */
+export function weekStartOf(dateStr) {
+  return addDays(dateStr, 1 - isoWeekday(dateStr));
+}

@@ -5,6 +5,7 @@ import { CONFIG } from './config.js';
 const BUCKET = 'meals';
 const MSG_COLS = 'id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,media_type,media_path,thumb_path,width,height,duration,bytes,created_at,read_at';
 const PROFILE_COLS = 'id,display_name,avatar,created_at,birthday,info,chat_bg';
+const SCHED_COLS = 'id,user_id,week_start,weekday,slot,start_time,end_time,content,updated_at';
 const SIGNED_TTL = 7 * 24 * 3600; // link ảnh có hạn 7 ngày
 const SIGNED_CACHE_KEY = 'bac-signed-v1';
 
@@ -96,12 +97,14 @@ export const api = {
   },
 
   async loadAll() {
-    const [profiles, settingsRows, reactions, messages, cycles] = await Promise.all([
+    const since = new Date(Date.now() - 200 * 86400e3).toISOString().slice(0, 10);
+    const [profiles, settingsRows, reactions, messages, cycles, schedule] = await Promise.all([
       sb.from('profiles').select(PROFILE_COLS).order('created_at').then(must),
       sb.from('couple_settings').select('*').eq('id', 1).then(must),
       sb.from('reactions').select('id,meal_id,user_id,emoji,created_at').then(must),
       sb.from('messages').select(MSG_COLS).order('created_at', { ascending: false }).limit(800).then(must),
       sb.from('cycles').select('id,user_id,start_date,end_date,created_by,created_at').order('start_date').then(must),
+      sb.from('schedule_items').select(SCHED_COLS).gte('week_start', since).then(must),
     ]);
     const meals = [];
     for (let from = 0; ; from += 1000) {
@@ -115,7 +118,7 @@ export const api = {
       meals.push(...page);
       if (page.length < 1000) break;
     }
-    return { profiles, settings: settingsRows[0] || null, meals, reactions, messages: messages.reverse(), cycles };
+    return { profiles, settings: settingsRows[0] || null, meals, reactions, messages: messages.reverse(), cycles, schedule };
   },
 
   async upload(path, blob, contentType, onProgress) {
@@ -218,6 +221,18 @@ export const api = {
     must(await sb.from('cycles').delete().eq('id', id));
   },
 
+  /** Lịch học/làm: ghi một hoặc nhiều ô (trùng tuần-thứ-ô thì cập nhật) */
+  async saveSchedule(rows) {
+    const list = Array.isArray(rows) ? rows : [rows];
+    return must(await sb.from('schedule_items')
+      .upsert(list, { onConflict: 'user_id,week_start,weekday,slot' })
+      .select(SCHED_COLS));
+  },
+
+  async deleteSchedule(id) {
+    must(await sb.from('schedule_items').delete().eq('id', id));
+  },
+
   async markRead(ids) {
     if (!ids.length) return;
     must(await sb.from('messages').update({ read_at: new Date().toISOString() }).in('id', ids).is('read_at', null));
@@ -237,7 +252,7 @@ export const api = {
 
   subscribe(onChange, onStatus) {
     const ch = sb.channel('be-an-chua-db');
-    for (const table of ['meals', 'reactions', 'couple_settings', 'profiles', 'messages', 'cycles']) {
+    for (const table of ['meals', 'reactions', 'couple_settings', 'profiles', 'messages', 'cycles', 'schedule_items']) {
       ch.on('postgres_changes', { event: '*', schema: 'public', table }, (payload) => onChange(table, payload));
     }
     ch.subscribe((status) => onStatus?.(status));
