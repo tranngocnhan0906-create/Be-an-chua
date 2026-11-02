@@ -1,4 +1,4 @@
-// Bé ăn chưa? — bản 2.0: Lịch ăn của Ny · Tin nhắn · Chị 🍓
+// Bé ăn chưa? — bản 2.1: Lịch ăn của Ny · Tin nhắn · Chị 🍓 · hồ sơ hai đứa
 import { api } from './api.js';
 import { CONFIG } from './config.js';
 import {
@@ -7,13 +7,50 @@ import {
   monthTitle, addMonths, daysInMonth, weekdayOf, esc, fmtBytes, uuid, computeStreak, loveInfo,
   isIOS, isAndroid, isStandalone, ymd,
   schedMinutes, fmtHM, schedDate, fmtDur, lateInfo, cyclePredict, cycleStatus, cycleDayKinds,
+  nextBirthday, ageOf, zodiacOf,
 } from './util.js';
-import { processFile } from './media.js';
+import { processFile, processImage } from './media.js';
 import { cat, ICONS } from './art.js';
+import { meow, unlockSound, soundOn, setSoundOn } from './sound.js';
 
 const app = document.getElementById('app');
 const QUICK_OWNER = ['Ăn chưa nè? 🍚', 'Ăn đúng giờ nha ⏰', 'Giỏi quá 👏', 'Nhớ quá à 🥺', 'Thương nhiều 💗'];
 const QUICK_NY = ['Ăn rồi nè 😋', 'Đang ăn nè 🍜', 'Tí ăn liền 🥺', 'Nhớ quá à 🥺', 'Thương nhiều 💗'];
+
+// Hồ sơ: các mục để hai đứa hiểu nhau hơn (lưu trong profiles.info)
+const INFO_FIELDS = [
+  { key: 'foods', icon: '😋', label: 'Món ăn ưa thích', ph: 'vd: bún bò, lẩu thái, bánh tráng trộn…', req: true },
+  { key: 'hobbies', icon: '🎨', label: 'Sở thích', ph: 'vd: xem phim, đi cà phê, chụp ảnh…', req: true },
+  { key: 'drinks', icon: '🧋', label: 'Thức uống ruột', ph: 'vd: trà sữa trân châu, 50% đường, ít đá' },
+  { key: 'dislikes', icon: '🙅', label: 'Món không ăn được / dị ứng', ph: 'vd: hành, sầu riêng, hải sản…' },
+  { key: 'comfort', icon: '🫂', label: 'Khi buồn hay dỗi thì cần', ph: 'vd: ôm thật lâu, trà sữa, đi dạo…' },
+  { key: 'color', icon: '🎀', label: 'Màu yêu thích', ph: 'vd: hồng pastel' },
+  { key: 'flower', icon: '🌷', label: 'Hoa yêu thích', ph: 'vd: hướng dương' },
+  { key: 'sizes', icon: '👗', label: 'Size áo · quần · giày', ph: 'vd: áo M, quần 27, giày 37' },
+  { key: 'wish', icon: '🌠', label: 'Điều ước nhỏ gần đây', ph: 'vd: một chiếc máy ảnh film' },
+];
+
+// Hình nền tin nhắn có sẵn
+const BG_PRESETS = [
+  { key: 'dots', name: 'Chấm bi' },
+  { key: 'paws', name: 'Chân mèo' },
+  { key: 'hearts', name: 'Tim hồng' },
+  { key: 'straw', name: 'Dâu tây' },
+  { key: 'sky', name: 'Mây trời' },
+  { key: 'sunset', name: 'Hoàng hôn' },
+  { key: 'mint', name: 'Bạc hà' },
+  { key: 'night', name: 'Đêm sao', dark: true },
+];
+
+// Lời buzz nhắc ăn (n = Ny, o = chủ app, m = tên bữa)
+const BUZZ_TEXTS = [
+  (n, o, m) => `Tới giờ ${m} rồi ${n} ơi, ăn liền cho ${o} yên tâm nha 🍚`,
+  (n, o, m) => `Bíp bíp! ${o} đang đói giùm ${n} nè, ăn ${m} đi rồi chụp hình nha 😿`,
+  (n, o, m) => `Mèo được ${o} sai đi nhắc: ${n} ăn ${m} chưa đó? 🐱`,
+  (n, o, m) => `Reng reng! Cơm nước gì chưa ${n}? ${o} đang chờ hình ${m} nè 📸`,
+];
+const buzzCooldown = {};
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 const state = {
   uid: null,
@@ -35,6 +72,7 @@ const state = {
   chatStick: false,
   chatStickUntil: 0,
   cycleMonth: null,
+  bgUrl: null, // { path, url } ảnh nền tin nhắn đã ký
 };
 
 // ============================================================ khởi động
@@ -52,6 +90,8 @@ if ('serviceWorker' in navigator) {
     }
   });
 }
+
+document.addEventListener('pointerdown', () => unlockSound(), { passive: true });
 
 boot();
 
@@ -111,7 +151,7 @@ async function doEnterApp(session) {
   state.unsubscribe = api.subscribe(onDbChange);
   onRoute();
   refreshPushState();
-  maybeWelcome();
+  if (!maybeRequireProfile()) maybeWelcome();
 }
 
 async function loadData() {
@@ -181,9 +221,11 @@ function onDbChange(table, p) {
     if (n.id) state.profiles.set(n.id, { ...(state.profiles.get(n.id) || {}), ...n });
   } else if (table === 'messages') {
     if (state.route.name === 'chat') state.chatStick = state.chatStick || isNearBottom();
+    const fresh = p.eventType === 'INSERT' && n.id && !state.messages.has(n.id);
     if (p.eventType === 'DELETE') state.messages.delete(o.id);
     else if (n.id) state.messages.set(n.id, { ...(state.messages.get(n.id) || {}), ...n });
     refreshBadge();
+    if (fresh && n.recipient_id === state.uid && n.sender_id !== state.uid) onIncoming(n);
   } else if (table === 'cycles') {
     if (p.eventType === 'DELETE') state.cycles.delete(o.id);
     else if (n.id) state.cycles.set(n.id, { ...(state.cycles.get(n.id) || {}), ...n });
@@ -317,6 +359,137 @@ async function hydrateMedia(root = document) {
   }
 }
 
+// ============================================================ hồ sơ (dùng chung: đăng ký, bổ sung, cài đặt)
+function infoOf(p) {
+  return p?.info && typeof p.info === 'object' ? p.info : {};
+}
+
+/** Ny bắt buộc có: ngày sinh, món ăn ưa thích, sở thích */
+function profileMissing(p) {
+  const i = infoOf(p);
+  return !p?.birthday || !String(i.foods || '').trim() || !String(i.hobbies || '').trim();
+}
+
+function rangeOptions(from, to, current, unit) {
+  let html = '';
+  for (let v = from; v <= to; v++) html += `<option value="${v}" ${v === current ? 'selected' : ''}>${v} ${unit}</option>`;
+  return html;
+}
+
+/** Các ô hồ sơ. withPeriod: hỏi thêm kỳ dâu gần nhất (cho Ny) */
+function profileFieldsHtml(p, { withPeriod = false, strict = true } = {}) {
+  const today = ymd(new Date());
+  const info = infoOf(p);
+  const req = (on) => (on && strict ? '<em class="req">*</em>' : '<em class="opt">không bắt buộc</em>');
+  const s = state.settings || {};
+  return `
+    <label class="field"><span>🎂 Ngày sinh ${req(true)}</span>
+      <input type="date" name="birthday" min="1940-01-01" max="${today}" value="${esc(p?.birthday || '')}"></label>
+    ${withPeriod ? `
+      <div class="pf-straw">
+        <label class="field"><span>🍓 Chị 🍓 ghé lần gần nhất ${req(true)}</span>
+          <input type="date" name="period_start" max="${today}" min="${addDays(today, -120)}"></label>
+        <p class="hint">Ngày bắt đầu kỳ dâu gần nhất. Không nhớ chính xác thì chọn ngày gần đúng nha.</p>
+        <div class="num-grid">
+          <label class="field"><span>Thường ở lại</span>
+            <select name="period_len">${rangeOptions(3, 8, s.period_length || 5, 'ngày')}</select></label>
+          <label class="field"><span>Bao lâu ghé một lần</span>
+            <select name="cycle_len"><option value="">Không rõ</option>${rangeOptions(21, 40, s.cycle_length && s.cycle_length !== 28 ? s.cycle_length : 0, 'ngày')}</select></label>
+        </div>
+      </div>` : ''}
+    ${INFO_FIELDS.map((f) => `
+      <label class="field"><span>${f.icon} ${f.label} ${req(f.req)}</span>
+        <textarea name="info_${f.key}" rows="${f.req ? 2 : 1}" maxlength="300" placeholder="${esc(f.ph)}">${esc(info[f.key] || '')}</textarea></label>`).join('')}`;
+}
+
+/** Đọc & kiểm tra các ô hồ sơ trong root. Trả về { error } hoặc { patch, period } */
+function readProfileFields(root, { withPeriod = false, strict = true } = {}) {
+  const today = ymd(new Date());
+  const val = (name) => String(root.querySelector(`[name="${name}"]`)?.value || '').trim();
+  const birthday = val('birthday');
+  const info = {};
+  for (const f of INFO_FIELDS) {
+    const v = val(`info_${f.key}`).slice(0, 300);
+    if (v) info[f.key] = v;
+  }
+  if (birthday) {
+    const age = ageOf(birthday, today);
+    if (age < 10 || age > 90) return { error: 'Ngày sinh chưa đúng lắm, kiểm tra lại nha 🎂' };
+  } else if (strict) return { error: 'Cho mèo biết ngày sinh nha 🎂' };
+  if (strict && !info.foods) return { error: 'Điền món ăn ưa thích nha 😋' };
+  if (strict && !info.hobbies) return { error: 'Điền sở thích nha 🎨' };
+  let period = null;
+  if (withPeriod) {
+    const start = val('period_start');
+    if (!start) return { error: 'Chọn ngày chị 🍓 ghé gần nhất nha 🍓' };
+    if (start > today) return { error: 'Ngày chị 🍓 ghé không thể ở tương lai nha' };
+    if (start < addDays(today, -120)) return { error: 'Chọn kỳ gần nhất trong 4 tháng nay thôi nha' };
+    period = { start, len: Number(val('period_len')) || null, cycle: Number(val('cycle_len')) || null };
+  }
+  return { patch: { birthday: birthday || null, info }, period };
+}
+
+/** Lưu kỳ dâu gần nhất + số ngày quen thuộc (lúc đăng ký / bổ sung hồ sơ) */
+async function savePeriodInfo(uid, period) {
+  if (!period) return;
+  const exists = [...state.cycles.values()].some((c) => c.user_id === uid && c.start_date === period.start);
+  if (!exists) {
+    const c = await api.addCycle(uid, period.start);
+    state.cycles.set(c.id, c);
+  }
+  const patch = {};
+  if (period.len) patch.period_length = period.len;
+  if (period.cycle) patch.cycle_length = period.cycle;
+  if (Object.keys(patch).length) state.settings = await api.updateSettings(patch).catch(() => state.settings);
+}
+
+/** Ny chưa đủ hồ sơ -> hiện bảng bắt buộc điền. Trả về true nếu đã hiện */
+function maybeRequireProfile() {
+  if (!isNy()) return false;
+  const needCycle = !nyCycles().length;
+  if (!profileMissing(me()) && !needCycle) return false;
+  if (/^#\/(p|new|m)\b/.test(location.hash)) history.replaceState(null, '', baseHash());
+  openOverlay('gate', `
+    <div class="sheet gate-sheet">
+      <div class="center">${cat({ size: 84, mood: 'love' })}</div>
+      <h3 class="center">Kể mèo nghe về ${esc(me().display_name)} nha 🐾</h3>
+      <p class="center muted">Điền xong là vào app liền. Mấy mục có dấu * là bắt buộc.</p>
+      <form id="gate-form" novalidate>
+        ${profileFieldsHtml(me(), { withPeriod: needCycle })}
+        <p class="form-err" id="gate-err" role="alert"></p>
+        <button class="btn primary block big-btn" type="submit">Lưu và vào app 💕</button>
+      </form>
+    </div>`, { locked: true });
+  return true;
+}
+
+async function submitGate(form) {
+  const err = document.getElementById('gate-err');
+  const needCycle = !nyCycles().length;
+  const r = readProfileFields(form, { withPeriod: needCycle });
+  err.textContent = '';
+  if (r.error) {
+    err.textContent = r.error;
+    return;
+  }
+  const btn = form.querySelector('button[type=submit]');
+  btn.disabled = true;
+  try {
+    const p = await api.updateProfile(state.uid, r.patch);
+    state.profiles.set(p.id, { ...me(), ...p });
+    await savePeriodInfo(state.uid, r.period);
+    state.overlay.locked = false;
+    closeOverlayDom();
+    hearts(window.innerWidth / 2, window.innerHeight / 2, 18);
+    toast('Mèo ghi nhớ hết rồi nè 🐾');
+    renderView();
+    maybeWelcome();
+  } catch (e) {
+    err.textContent = e.message;
+    btn.disabled = false;
+  }
+}
+
 // ============================================================ đăng nhập / đăng ký
 function showAuth(mode = 'login') {
   const signup = mode === 'signup';
@@ -333,25 +506,55 @@ function showAuth(mode = 'login') {
         <button type="button" class="${signup ? 'on' : ''}" data-auth-mode="signup">Tạo tài khoản</button>
       </div>
       <form id="auth-form" novalidate>
+        <div class="auth-step" data-step="1">
+          ${signup ? `<p class="step-title">Bước 1/2 · Tài khoản</p>` : ''}
+          <label class="field"><span>Email</span>
+            <input name="email" type="email" inputmode="email" autocomplete="email" placeholder="ban@email.com" required></label>
+          <label class="field"><span>Mật khẩu</span>
+            <input name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" placeholder="Ít nhất 6 ký tự" minlength="6" required></label>
+          ${signup ? `
+            <label class="field"><span>Mã mời</span>
+              <input name="invite" autocapitalize="characters" autocomplete="off" placeholder="Mã do người tạo app gửi" required></label>` : ''}
+        </div>
         ${signup ? `
-          <label class="field"><span>Tên gọi của bạn</span>
-            <input name="display_name" maxlength="40" placeholder="vd: Bé Heo" required autocomplete="nickname"></label>
-          <div class="field"><span>Chọn linh vật</span>
-            <div class="avatar-pick small">${AVATARS.map((a, i) => `<button type="button" class="av-opt ${i === 0 ? 'on' : ''}" data-av="${a}">${a}</button>`).join('')}</div>
+          <div class="auth-step" data-step="2" hidden>
+            <p class="step-title">Bước 2/2 · Kể mèo nghe về bạn 🐾</p>
+            <label class="field"><span>Tên gọi của bạn <em class="req">*</em></span>
+              <input name="display_name" maxlength="40" placeholder="vd: Bé Heo" required autocomplete="nickname"></label>
+            <div class="field"><span>Chọn linh vật</span>
+              <div class="avatar-pick small">${AVATARS.map((a, i) => `<button type="button" class="av-opt ${i === 5 ? 'on' : ''}" data-av="${a}">${a}</button>`).join('')}</div>
+            </div>
+            ${profileFieldsHtml(null, { withPeriod: true })}
           </div>` : ''}
-        <label class="field"><span>Email</span>
-          <input name="email" type="email" inputmode="email" autocomplete="email" placeholder="ban@email.com" required></label>
-        <label class="field"><span>Mật khẩu</span>
-          <input name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" placeholder="Ít nhất 6 ký tự" minlength="6" required></label>
-        ${signup ? `
-          <label class="field"><span>Mã mời</span>
-            <input name="invite" autocapitalize="characters" autocomplete="off" placeholder="Mã do người tạo app gửi" required></label>` : ''}
         <p class="form-err" id="auth-err" role="alert"></p>
-        <button class="btn primary block" type="submit">${signup ? 'Tạo tài khoản 🐾' : 'Vào thôi 🐾'}</button>
+        ${signup ? `
+          <button class="btn primary block" type="button" data-action="signup-next" data-step-btn="1">Tiếp tục →</button>
+          <div class="btn-row step-btns" data-step-btn="2" hidden>
+            <button class="btn ghost" type="button" data-action="signup-back">← Quay lại</button>
+            <button class="btn primary grow" type="submit">Tạo tài khoản 🐾</button>
+          </div>` : `<button class="btn primary block" type="submit">Vào thôi 🐾</button>`}
       </form>
     </div>
     <p class="auth-foot">Chỉ hai đứa mình xem được thôi nha 🔒</p>
   </div>`;
+}
+
+function signupStep(n) {
+  const form = document.getElementById('auth-form');
+  if (!form) return;
+  form.querySelectorAll('.auth-step').forEach((el) => { el.hidden = el.dataset.step !== String(n); });
+  form.querySelectorAll('[data-step-btn]').forEach((el) => { el.hidden = el.dataset.stepBtn !== String(n); });
+  document.getElementById('auth-err').textContent = '';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function checkSignupStep1(form) {
+  const fd = new FormData(form);
+  const email = String(fd.get('email') || '').trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return 'Email chưa đúng, kiểm tra lại nha';
+  if (String(fd.get('password') || '').length < 6) return 'Mật khẩu cần ít nhất 6 ký tự';
+  if (!String(fd.get('invite') || '').trim()) return 'Nhập mã mời nha';
+  return '';
 }
 
 async function submitAuth(form) {
@@ -366,9 +569,23 @@ async function submitAuth(form) {
     err.textContent = 'Nhập email và mật khẩu nha';
     return;
   }
-  if (signup && !String(fd.get('display_name') || '').trim()) {
-    err.textContent = 'Cho mèo biết tên gọi của bạn nha';
-    return;
+  let prof = null;
+  if (signup) {
+    const e1 = checkSignupStep1(form);
+    if (e1) {
+      signupStep(1);
+      err.textContent = e1;
+      return;
+    }
+    if (!String(fd.get('display_name') || '').trim()) {
+      err.textContent = 'Cho mèo biết tên gọi của bạn nha';
+      return;
+    }
+    prof = readProfileFields(form.querySelector('[data-step="2"]'), { withPeriod: true });
+    if (prof.error) {
+      err.textContent = prof.error;
+      return;
+    }
   }
   btn.disabled = true;
   btn.classList.add('loading');
@@ -382,12 +599,18 @@ async function submitAuth(form) {
         avatar: form.querySelector('.av-opt.on')?.dataset.av || '🐱',
         inviteCode: String(fd.get('invite') || '').trim(),
       });
+      // lưu hồ sơ ngay sau khi có tài khoản (lỗi thì lúc vào app sẽ hỏi lại)
+      try {
+        await api.updateProfile(session.user.id, prof.patch);
+        await savePeriodInfo(session.user.id, prof.period);
+      } catch { /* bảng bổ sung hồ sơ sẽ hỏi lại */ }
     } else {
       session = await api.signIn(email, password);
     }
     await enterApp(session);
   } catch (e) {
     err.textContent = e.message;
+    if (signup && /mời|email|mật khẩu/i.test(e.message)) signupStep(1);
   } finally {
     btn.disabled = false;
     btn.classList.remove('loading');
@@ -399,6 +622,7 @@ function renderShell() {
   app.innerHTML = `
   <header class="topbar">
     <a class="brand" href="#/">${cat({ size: 36, mood: 'happy' })}<span class="brand-name">${esc(state.settings.app_name || 'Bé ăn chưa?')}</span></a>
+    <a class="love-chip" href="#/us" id="love-chip" aria-label="Hai đứa mình">${loveChipHtml()}</a>
     <a class="me-chip" href="#/settings" aria-label="Cài đặt"><span class="me-av">${esc(avatarOf(state.uid))}</span><span class="me-gear">${ICONS.gear}</span></a>
   </header>
   <main id="view" class="view"></main>
@@ -447,13 +671,17 @@ function onRoute() {
   const r = parseRoute();
   const viewEmpty = !document.getElementById('view')?.innerHTML;
   if (r.name === 'post' || r.name === 'media' || r.name === 'new') {
+    if (state.overlay?.locked) {
+      history.replaceState(null, '', baseHash());
+      return;
+    }
     if (viewEmpty) renderView();
     if (r.name === 'post') openViewer(r.id);
     else if (r.name === 'media') openMediaViewer(r.id);
     else openComposer(r.meal, r.date);
     return;
   }
-  if (state.overlay) closeOverlayDom();
+  if (state.overlay && !state.overlay.locked) closeOverlayDom();
   const changed = r.name !== state.route.name;
   state.route = r;
   renderView();
@@ -486,7 +714,16 @@ function renderView() {
   for (const t of document.querySelectorAll('[data-tab]')) t.classList.toggle('on', t.dataset.tab === tab);
   const av = document.querySelector('.me-av');
   if (av) av.textContent = avatarOf(state.uid);
+  const chip = document.getElementById('love-chip');
+  if (chip) chip.innerHTML = loveChipHtml();
+  document.body.classList.toggle('has-chat-bg', inChat && chatBgKey() !== 'dots');
+  document.body.classList.toggle('chat-dark', inChat && !!BG_PRESETS.find((b) => b.key === chatBgKey())?.dark);
   hydrateMedia(view);
+  if (inChat) hydrateChatBg();
+  if (r.name === 'settings' && state.scrollToProfile) {
+    state.scrollToProfile = false;
+    requestAnimationFrame(() => document.getElementById('pf-settings')?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+  }
   if (inChat) {
     const input = document.getElementById('chat-text');
     const p2 = partner();
@@ -557,8 +794,11 @@ function slotCardHtml(date, meal, canPost) {
   } else if (canPost) {
     body = `<button class="report-btn ${cls === 'alert' ? 'urgent' : ''}" data-new="${meal.key}">📸 Báo cáo ${meal.name.toLowerCase()} cho ${esc(ownerName())}</button>`;
   } else if (st.state === 'overdue') {
-    body = `<div class="empty-note red-note">${esc(nyName())} chưa gửi hình ${meal.name.toLowerCase()}
-      <button class="nudge-btn" data-action="nudge" data-meal="${meal.key}">💌 Nhắn nhắc ${esc(nyName())} ngay</button></div>`;
+    body = `<div class="empty-note red-note">${esc(nyName())} chưa gửi hình ${meal.name.toLowerCase()}</div>`;
+  }
+  // Chủ app: nút Buzz nhắc Ny bữa này bất cứ lúc nào trong ngày
+  if (!isNy() && nyId() && date === mealDay() && (st.state === 'upcoming' || st.state === 'overdue')) {
+    body += buzzBlockHtml(meal, st.state === 'overdue');
   }
   return `
     <section class="meal-sec ${cls}" style="--mc: var(--m-${meal.key})">
@@ -570,6 +810,40 @@ function slotCardHtml(date, meal, canPost) {
       ${chip ? `<div class="slot-status">${chip}</div>` : ''}
       ${body}
     </section>`;
+}
+
+function myBuzzes(date, type) {
+  return [...state.messages.values()]
+    .filter((m) => m.kind === 'buzz' && m.sender_id === state.uid && m.meal_date === date && m.meal_type === type)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+function buzzBlockHtml(meal, hot) {
+  const list = myBuzzes(mealDay(), meal.key);
+  const last = list[list.length - 1];
+  const note = last
+    ? `Đã buzz ${list.length} lần · lần cuối ${fmtTime(last.created_at)}${last.pending ? ' (đang gửi…)' : ''}`
+    : hot ? `Quá giờ rồi, buzz cho ${esc(nyName())} nhớ ăn đi!` : 'Nhắc trước cho nhớ cũng được nè';
+  return `
+    <div class="buzz-row">
+      <button class="buzz-btn ${hot ? 'hot' : ''}" data-buzz="${meal.key}">🔔 Buzzz ${esc(nyName())}</button>
+      <small>${note}</small>
+    </div>`;
+}
+
+async function sendBuzz(type, btn) {
+  if ((buzzCooldown[type] || 0) > Date.now()) {
+    toast('Vừa buzz xong, đợi xíu nha 🐱');
+    return;
+  }
+  buzzCooldown[type] = Date.now() + 15000;
+  const mi = MEAL_BY_KEY[type];
+  btn?.classList.add('ringing');
+  navigator.vibrate?.(40);
+  await sendChat(pick(BUZZ_TEXTS)(nyName(), ownerName(), mi.name.toLowerCase()), {
+    kind: 'buzz', meal_type: type, meal_date: mealDay(),
+  });
+  toast(`Đã buzz ${nyName()} ${mi.name.toLowerCase()} 🔔`);
 }
 
 function snackSectionHtml(date, canPost) {
@@ -595,7 +869,6 @@ function viewDay() {
   const diff = daysBetween(date, today);
   const hasNy = !!nyId();
   const canPost = isNy() && diff >= 0 && diff <= 1;
-  const love = loveInfo(state.settings?.start_date);
   const streak = hasNy ? computeStreak(nyMeals(), nyId(), today) : null;
 
   let summary = '';
@@ -619,7 +892,6 @@ function viewDay() {
   const pills = `
     <div class="pills">
       <a class="pill" href="#/cal/${date.slice(0, 7)}">📅 Cả tháng</a>
-      ${love && !love.future ? `<a class="pill love" href="#/us">💞 Bên nhau <b>${love.days}</b> ngày</a>` : ''}
       ${streak ? `<a class="pill streak" href="#/us">🔥 Ăn đủ bữa <b>${streak.current}</b> ngày</a>` : ''}
       ${hasNy ? cyclePill() : ''}
     </div>`;
@@ -716,6 +988,45 @@ function viewCalendar() {
 }
 
 // ------------------------------------------------------------ Hai đứa
+function loveChipHtml() {
+  const love = loveInfo(state.settings?.start_date);
+  if (!love) return '💞 <span>Ngày yêu?</span>';
+  return `💞 <b>${love.future ? 0 : love.days}</b><span> ngày</span>`;
+}
+
+function profileCardHtml(p, role) {
+  if (!p) return '';
+  const today = ymd(new Date());
+  const info = infoOf(p);
+  const mine = p.id === state.uid;
+  let bday = '';
+  if (p.birthday) {
+    const nb = nextBirthday(p.birthday, today);
+    const z = zodiacOf(p.birthday);
+    const when = nb.daysTo === 0 ? '<b class="hl">Hôm nay! 🎉</b>' : nb.daysTo === 1 ? '<b class="hl">Ngày mai! 🎁</b>' : `còn <b>${nb.daysTo}</b> ngày`;
+    bday = `
+      <div class="pc-bday">
+        <span>🎂 ${fmtDmy(p.birthday)} · ${ageOf(p.birthday, today)} tuổi</span>
+        <span>🎁 Sinh nhật ${when}</span>
+        <span>${z.icon} Cung ${z.name}</span>
+      </div>`;
+  }
+  const rows = INFO_FIELDS.filter((f) => info[f.key]).map((f) => `
+    <div class="pc-row"><span class="pc-ico">${f.icon}</span><div><small>${f.label}</small><p>${esc(info[f.key])}</p></div></div>`).join('');
+  const missing = profileMissing(p);
+  return `
+    <div class="card profile-card">
+      <div class="pc-head">
+        <span class="pc-av">${esc(p.avatar)}</span>
+        <div class="pc-name"><b>${esc(p.display_name)}</b><small>${role}</small></div>
+        ${mine ? `<a class="btn small ghost" href="#/settings" data-goto-profile>✏️ Sửa</a>` : ''}
+      </div>
+      ${bday}
+      ${rows ? `<div class="pc-rows">${rows}</div>` : ''}
+      ${missing ? `<p class="pc-empty">${mine ? 'Điền ngày sinh, món ruột, sở thích… để người ấy hiểu mình hơn nha 🐾' : `${esc(p.display_name)} chưa điền hồ sơ 🙈`}</p>` : ''}
+    </div>`;
+}
+
 function viewUs() {
   const today = mealDay();
   const love = loveInfo(state.settings?.start_date);
@@ -765,6 +1076,8 @@ function viewUs() {
   return `
     <h2 class="page-title"><a href="#/" class="back-link">${ICONS.left}</a> Hai đứa mình 💞</h2>
     ${loveCard}
+    ${nyId() ? profileCardHtml(ny(), '🐷 Ny của app') : ''}
+    ${profileCardHtml(owner(), '👑 Chủ app')}
     ${nyCard}
     ${loved.length ? `<div class="card"><h3>Được thương nhiều nhất 💗</h3><div class="post-row wrap">${loved.map((m) => postCard(m)).join('')}</div></div>` : ''}
     <div class="bottom-space"></div>`;
@@ -1118,9 +1431,47 @@ function cycleCardHtml(m) {
     </a>`;
 }
 
+function eventCardHtml(m) {
+  let d = null;
+  try { d = JSON.parse(m.body); } catch { /* chữ thường */ }
+  if (!d) return `<div class="cycle-card event-card"><p>${esc(m.body)}</p></div>`;
+  const mine = isNy() ? d.ny : d.owner;
+  const icon = { birthday: '🎂', love100: '💞', anniv: '💍' }[d.event] || '🎉';
+  return `
+    <a class="cycle-card event-card" href="#/us">
+      <div class="cy-top"><span class="cy-icon">${icon}</span><b>${esc(d.title)}</b><time>${fmtTime(m.created_at)}</time></div>
+      <p class="cy-mine">${esc(mine)}</p>
+    </a>`;
+}
+
+function buzzHtml(m) {
+  const mi = MEAL_BY_KEY[m.meal_type] || MEALS[0];
+  const forMe = m.recipient_id === state.uid;
+  const reported = m.meal_date && m.meal_type ? nyMealsOn(m.meal_date, m.meal_type)[0] : null;
+  const diff = m.meal_date ? daysBetween(m.meal_date, mealDay()) : 99;
+  let action;
+  if (reported) {
+    action = `<div class="rc-done">✅ ${forMe ? 'Đã báo cáo' : `${esc(nyName())} đã báo cáo`} lúc ${fmtTime(reported.created_at)} · <button class="link-btn" data-open="${reported.id}">Xem hình</button></div>`;
+  } else if (forMe && diff >= 0 && diff <= 1) {
+    action = `<button class="btn primary rc-btn" data-report="${m.meal_type}|${m.meal_date}">📸 Báo cáo ${mi.name.toLowerCase()} ngay</button>`;
+  } else if (!forMe && diff === 0) {
+    action = `<div class="rc-note">⏳ Chưa thấy hình ${mi.name.toLowerCase()}…</div>`;
+  } else {
+    action = `<div class="rc-note">${forMe ? 'Bữa này qua rồi 🥲' : '😿 Bữa này không có hình'}</div>`;
+  }
+  return `
+    <div class="buzz-card ${m.pending ? 'pending' : ''}">
+      <div class="bz-top"><span class="bz-bell">🔔</span><b>Buzzz!</b><span class="bz-from">${esc(avatarOf(m.sender_id))} ${forMe ? esc(nameOf(m.sender_id)) : 'Bạn'} · ${fmtTime(m.created_at)}</span></div>
+      <p>${mi.icon} ${esc(m.body || '')}</p>
+      ${action}
+    </div>`;
+}
+
 function msgHtml(m, grouped) {
   if (m.kind === 'reminder') return reminderHtml(m);
   if (m.kind === 'cycle') return cycleCardHtml(m);
+  if (m.kind === 'event') return eventCardHtml(m);
+  if (m.kind === 'buzz') return buzzHtml(m);
   const mine = m.sender_id === state.uid;
   const time = fmtTime(m.created_at);
   if (m.kind === 'heart') {
@@ -1195,14 +1546,142 @@ function viewChat() {
   }
   const empty = `<div class="chat-empty">${cat({ size: 96, mood: 'love' })}<p>Chưa có tin nhắn nào.<br>Nhắn một câu thương thương đi 💌</p></div>`;
   return `
+    ${chatBgHtml()}
     <div class="chat-head">
       <button class="icon-btn" data-action="chat-back" aria-label="Về Lịch ăn">${ICONS.left}</button>
-      <span class="chat-av">${esc(p2?.avatar || '💌')}</span>
+      <a class="chat-av" href="#/us" aria-label="Hồ sơ">${esc(p2?.avatar || '💌')}</a>
       <div class="chat-title"><b>${esc(p2?.display_name || 'Đang chờ người thương')}</b>
         <small>${p2 ? 'Chỉ hai đứa mình thấy 🔒' : 'Gửi link app và mã mời cho người ấy nha'}</small></div>
+      <button class="icon-btn head-bg" data-action="chat-bg" aria-label="Đổi hình nền">🎨</button>
       <a class="icon-btn head-straw" href="#/cycle" aria-label="Chị 🍓">🍓</a>
     </div>
     <div class="chat-list">${list.length ? html : empty}</div>`;
+}
+
+// ------------------------------------------------------------ hình nền tin nhắn (mỗi người tự chọn)
+function chatBgValue() {
+  return String(me()?.chat_bg || '');
+}
+
+function chatBgKey() {
+  const v = chatBgValue();
+  if (v.startsWith('photo:')) return 'photo';
+  const key = v.startsWith('preset:') ? v.slice(7) : 'dots';
+  return BG_PRESETS.some((b) => b.key === key) ? key : 'dots';
+}
+
+function chatBgPhoto() {
+  const v = chatBgValue();
+  if (!v.startsWith('photo:')) return null;
+  const [path, flag] = v.slice(6).split('|');
+  return { path, soft: flag !== 'sharp' };
+}
+
+function chatBgHtml() {
+  const key = chatBgKey();
+  if (key !== 'photo') return `<div class="chat-bg bg-${key}" aria-hidden="true"></div>`;
+  const ph = chatBgPhoto();
+  const url = state.bgUrl?.path === ph.path ? state.bgUrl.url : '';
+  return `<div class="chat-bg bg-photo ${ph.soft ? 'soft' : ''}" data-bgpath="${esc(ph.path)}" aria-hidden="true" ${url ? `style="background-image:url('${url}')"` : ''}></div>`;
+}
+
+async function hydrateChatBg() {
+  const ph = chatBgPhoto();
+  if (!ph || state.bgUrl?.path === ph.path) return;
+  try {
+    const map = await api.signedUrls([ph.path]);
+    const url = map.get(ph.path);
+    if (!url) return;
+    state.bgUrl = { path: ph.path, url };
+    const el = document.querySelector(`.chat-bg[data-bgpath="${CSS.escape(ph.path)}"]`);
+    if (el) el.style.backgroundImage = `url('${url}')`;
+  } catch { /* để nền trơn */ }
+}
+
+function bgSheetHtml() {
+  const key = chatBgKey();
+  const ph = chatBgPhoto();
+  return `
+    <div class="sheet bg-sheet">
+      <div class="grab"></div>
+      <div class="sheet-head"><h3>🎨 Hình nền tin nhắn</h3>
+        <button class="icon-btn" data-action="close-overlay" aria-label="Đóng">${ICONS.close}</button></div>
+      <div class="bg-grid">
+        ${BG_PRESETS.map((b) => `<button type="button" class="bg-tile bg-${b.key} ${key === b.key ? 'on' : ''}" data-bg="${b.key}"><span>${b.name}</span></button>`).join('')}
+        <label class="bg-tile bg-upload ${key === 'photo' ? 'on' : ''}" ${ph && state.bgUrl?.path === ph.path ? `style="background-image:url('${state.bgUrl.url}')"` : ''}>
+          <span>📷 Ảnh của mình</span><input type="file" accept="image/*" data-bg-pick hidden></label>
+      </div>
+      ${ph ? `<label class="switch-row"><span>Làm dịu ảnh cho dễ đọc chữ</span>
+        <input type="checkbox" id="bg-soft" ${ph.soft ? 'checked' : ''}><i class="switch"></i></label>` : ''}
+      <p class="hint">Hình nền chỉ đổi trên tài khoản của bạn, người kia vẫn giữ nền riêng.</p>
+    </div>`;
+}
+
+function openBgSheet() {
+  openOverlay('info', bgSheetHtml());
+  state.overlay.sub = 'bg';
+}
+
+async function setChatBg(value) {
+  const old = chatBgPhoto();
+  try {
+    const p = await api.updateProfile(state.uid, { chat_bg: value });
+    state.profiles.set(p.id, { ...me(), ...p });
+    if (old && !String(value || '').startsWith(`photo:${old.path}`)) api.removeFiles([old.path]).catch(() => {});
+    renderView();
+    const wrap = document.querySelector('.overlay .sheet-wrap');
+    if (wrap && state.overlay?.sub === 'bg') wrap.innerHTML = bgSheetHtml();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function uploadChatBg(file) {
+  toast('Đang đặt ảnh nền… 🖼️');
+  try {
+    const img = await processImage(file);
+    const path = `${state.uid}/bg/${uuid()}.jpg`;
+    await api.upload(path, img.main, 'image/jpeg');
+    state.bgUrl = { path, url: img.previewUrl };
+    await setChatBg(`photo:${path}`);
+    toast('Đã đổi hình nền 🎨');
+  } catch (e) {
+    toast(e.message, 'error', 4000);
+  }
+}
+
+// ------------------------------------------------------------ có tin mới: kêu meo, buzz thì rung
+function onIncoming(m) {
+  if (document.visibilityState !== 'visible') return;
+  if (m.kind === 'buzz') return onBuzzArrived(m);
+  const kind = { reminder: 'remind', cycle: 'cycle', event: 'cycle', heart: 'heart', report: 'report' }[m.kind] || 'msg';
+  meow(kind);
+  if (m.kind === 'reminder') navigator.vibrate?.([120, 60, 120]);
+}
+
+function onBuzzArrived(m) {
+  meow('buzz');
+  navigator.vibrate?.([220, 90, 220, 90, 420]);
+  document.body.classList.remove('shake');
+  void document.body.offsetWidth;
+  document.body.classList.add('shake');
+  setTimeout(() => document.body.classList.remove('shake'), 900);
+  const mi = MEAL_BY_KEY[m.meal_type] || MEALS[0];
+  const done = m.meal_date && m.meal_type && nyMealsOn(m.meal_date, m.meal_type).length;
+  if (state.overlay) {
+    toast(`🔔 ${nameOf(m.sender_id)} buzz bạn ăn ${mi.name.toLowerCase()}!`, 'buzz', 4200);
+    return;
+  }
+  openOverlay('buzz', `
+    <div class="sheet buzz-sheet">
+      <div class="bz-big">🔔</div>
+      <h3>Buzzz! ${esc(avatarOf(m.sender_id))}</h3>
+      <p>${esc(m.body || `${nameOf(m.sender_id)} nhắc bạn ăn ${mi.name.toLowerCase()} nè`)}</p>
+      <div class="btn-row center-row">
+        ${done ? '' : `<button class="btn primary" data-report="${m.meal_type}|${m.meal_date}">📸 Báo cáo ${mi.name.toLowerCase()}</button>`}
+        <button class="btn ghost" data-action="close-overlay">${done ? 'Biết rồi 😚' : 'Để tí nữa 🥺'}</button>
+      </div>
+    </div>`);
 }
 
 async function sendChat(text, extra = {}) {
@@ -1223,7 +1702,8 @@ async function sendChat(text, extra = {}) {
   } catch (e) {
     state.messages.delete(tempId);
     toast(e.message, 'error');
-    if (!extra.media_path) {
+    if (extra.kind === 'buzz') delete buzzCooldown[extra.meal_type];
+    else if (!extra.media_path) {
       const input = document.getElementById(extra.meal_id ? 'cmt-input' : 'chat-text');
       if (input && !input.value) input.value = body;
     }
@@ -1319,13 +1799,27 @@ function viewSettings() {
   return `
     <h2 class="page-title"><a href="#/" class="back-link">${ICONS.left}</a> Cài đặt ⚙️</h2>
 
-    <div class="card form-card">
+    <div class="card form-card" id="profile-card">
       <h3>Hồ sơ của mình</h3>
+      <p class="hint">Người ấy xem được ở trang Hai đứa mình 💞${isNy() ? ' · mục có dấu * là bắt buộc' : ''}</p>
       <label class="field"><span>Tên gọi</span><input id="my-name" maxlength="40" value="${esc(p.display_name)}"></label>
       <div class="field"><span>Linh vật</span>
         <div class="avatar-pick">${AVATARS.map((a) => `<button type="button" class="av-opt ${a === p.avatar ? 'on' : ''}" data-myav="${a}">${a}</button>`).join('')}</div>
       </div>
+      <div id="pf-settings">${profileFieldsHtml(p, { strict: isNy() })}</div>
+      <p class="form-err" id="pf-err" role="alert"></p>
       <button class="btn primary" data-action="save-profile">Lưu hồ sơ</button>
+    </div>
+
+    <div class="card form-card">
+      <h3>🐱 Tiếng mèo & hình nền</h3>
+      <label class="switch-row"><span>Mèo kêu khi có tin nhắn, buzz, nhắc giờ ăn</span>
+        <input type="checkbox" id="snd-on" ${soundOn() ? 'checked' : ''}><i class="switch"></i></label>
+      <div class="btn-row">
+        <button class="btn ghost" data-action="test-meow">🔊 Nghe thử</button>
+        <button class="btn ghost" data-action="chat-bg">🎨 Hình nền tin nhắn</button>
+      </div>
+      <p class="hint">Tiếng mèo kêu khi app đang mở. Lúc app đóng, điện thoại phát âm báo mặc định vì web app không được đổi âm thông báo của máy.${isAndroid() ? ' Trên Android có thể tải <a class="link-btn" href="sounds/meow.mp3" download="meo-meo.mp3">tiếng mèo</a> về máy rồi chọn làm âm báo trong Cài đặt → Ứng dụng → Bé ăn chưa? → Thông báo.' : ''}</p>
     </div>
 
     <div class="card form-card">
@@ -1465,10 +1959,10 @@ function overlayRoot() {
   return document.getElementById('overlays');
 }
 
-function openOverlay(kind, html, { pushed, id } = {}) {
+function openOverlay(kind, html, { pushed, id, locked } = {}) {
   const root = overlayRoot();
-  root.innerHTML = `<div class="overlay ${kind}" data-kind="${kind}"><div class="backdrop" data-action="close-overlay"></div><div class="sheet-wrap">${html}</div></div>`;
-  state.overlay = { kind, pushed: !!pushed, id };
+  root.innerHTML = `<div class="overlay ${kind}" data-kind="${kind}"><div class="backdrop" ${locked ? '' : 'data-action="close-overlay"'}></div><div class="sheet-wrap">${html}</div></div>`;
+  state.overlay = { kind, pushed: !!pushed, id, locked: !!locked };
   document.body.classList.add('no-scroll');
   requestAnimationFrame(() => root.firstElementChild?.classList.add('open'));
 }
@@ -1496,7 +1990,7 @@ function baseHash() {
 
 function closeOverlay() {
   const ov = state.overlay;
-  if (!ov) return;
+  if (!ov || ov.locked) return;
   if (ov.pushed) {
     history.back();
   } else {
@@ -1887,6 +2381,15 @@ document.addEventListener('click', async (e) => {
   if (!t) return;
 
   if (t.dataset.authMode) return showAuth(t.dataset.authMode);
+  if (t.dataset.buzz) {
+    sendBuzz(t.dataset.buzz, t);
+    return;
+  }
+  if (t.dataset.bg) {
+    setChatBg(t.dataset.bg === 'dots' ? null : `preset:${t.dataset.bg}`);
+    return;
+  }
+  if (t.hasAttribute('data-goto-profile')) state.scrollToProfile = true;
   if (t.classList.contains('av-opt') && t.closest('.avatar-pick')) {
     t.closest('.avatar-pick').querySelectorAll('.av-opt').forEach((b) => b.classList.toggle('on', b === t));
     return;
@@ -1991,6 +2494,25 @@ document.addEventListener('click', async (e) => {
   const action = t.dataset.action;
   if (!action) return;
   switch (action) {
+    case 'signup-next': {
+      const form = document.getElementById('auth-form');
+      const e1 = checkSignupStep1(form);
+      if (e1) {
+        document.getElementById('auth-err').textContent = e1;
+        return;
+      }
+      signupStep(2);
+      break;
+    }
+    case 'signup-back':
+      signupStep(1);
+      break;
+    case 'chat-bg':
+      openBgSheet();
+      break;
+    case 'test-meow':
+      meow('test', { force: true });
+      break;
     case 'retry':
       location.reload();
       break;
@@ -2096,9 +2618,16 @@ document.addEventListener('click', async (e) => {
     case 'save-profile': {
       const name = document.getElementById('my-name').value.trim();
       const avatar = document.querySelector('[data-myav].on')?.dataset.myav || me().avatar;
+      const errEl = document.getElementById('pf-err');
+      if (errEl) errEl.textContent = '';
       if (!name) return toast('Tên gọi không được trống nha', 'error');
+      const r = readProfileFields(document.getElementById('pf-settings'), { strict: isNy() });
+      if (r.error) {
+        if (errEl) errEl.textContent = r.error;
+        return toast(r.error, 'error');
+      }
       try {
-        const p = await api.updateProfile(state.uid, { display_name: name, avatar });
+        const p = await api.updateProfile(state.uid, { display_name: name, avatar, ...r.patch });
         state.profiles.set(p.id, { ...me(), ...p });
         toast('Đã lưu hồ sơ 🐾');
         renderView();
@@ -2158,6 +2687,9 @@ document.addEventListener('submit', (e) => {
   if (e.target.id === 'auth-form') {
     e.preventDefault();
     submitAuth(e.target);
+  } else if (e.target.id === 'gate-form') {
+    e.preventDefault();
+    submitGate(e.target);
   } else if (e.target.id === 'cmt-form') {
     e.preventDefault();
     const input = document.getElementById('cmt-input');
@@ -2179,6 +2711,19 @@ document.addEventListener('submit', (e) => {
 
 document.addEventListener('change', (e) => {
   if (e.target.matches('input[data-pick]')) onPickFile(e.target);
+  if (e.target.matches('input[data-bg-pick]')) {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (f) uploadChatBg(f);
+  }
+  if (e.target.id === 'bg-soft') {
+    const ph = chatBgPhoto();
+    if (ph) setChatBg(`photo:${ph.path}${e.target.checked ? '' : '|sharp'}`);
+  }
+  if (e.target.id === 'snd-on') {
+    setSoundOn(e.target.checked);
+    if (e.target.checked) meow('test', { force: true });
+  }
   if (e.target.matches('input[data-chat-pick]')) {
     const f = e.target.files?.[0];
     document.getElementById('attach-menu').hidden = true;
@@ -2206,5 +2751,5 @@ document.addEventListener('pointerup', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && state.overlay) closeOverlay();
+  if (e.key === 'Escape' && state.overlay && !state.overlay.locked) closeOverlay();
 });

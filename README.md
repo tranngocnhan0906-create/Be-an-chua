@@ -2,7 +2,7 @@
 
 App nhỏ cho hai đứa mình: theo dõi giờ ăn của Ny, nhắn tin riêng và lịch "chị 🍓". Chỉ hai tài khoản (có mã mời) xem được. Người tạo tài khoản đầu tiên là **chủ app**, người thứ hai là **Ny**.
 
-## Tính năng (bản 2.0)
+## Tính năng (bản 2.1)
 - **Lịch ăn** (tab trái): ba bữa chính của Ny theo giờ ăn chuẩn (mặc định 07:30 · 12:00 · 19:00, đổi trong Cài đặt)
   - Mỗi bữa hiện giờ đăng hình và trễ/sớm bao lâu so với giờ ăn
   - Quá giờ chưa có hình: thẻ **báo đỏ** kèm số phút trễ; ngày đã qua mà thiếu hình: "Bỏ bữa"
@@ -14,6 +14,11 @@ App nhỏ cho hai đứa mình: theo dõi giờ ăn của Ny, nhắn tin riêng 
 - **Chị 🍓** (tab phải): đánh dấu ngày tới / ngày đi, dự đoán kỳ sau, ngày dễ nóng tính, ngày dễ thụ thai, ngày rụng trứng, lịch tháng và lịch sử
   - Bản tin vui cho cả hai lúc 8h sáng các ngày mốc và khi đánh dấu tới/đi
   - Chỉ là dự đoán để quan tâm nhau, không dùng để tránh thai
+- **Hồ sơ hai đứa**: lúc tạo tài khoản phải điền ngày sinh, kỳ dâu gần nhất, món ăn ưa thích, sở thích (thêm thức uống ruột, món không ăn được, khi buồn cần gì, màu/hoa yêu thích, size, điều ước). Xem ở trang **Hai đứa mình** cùng số ngày yêu nhau, đếm ngược sinh nhật, cung hoàng đạo
+- Số ngày yêu nhau luôn hiện trên thanh trên cùng; 8h sáng ngày sinh nhật, tròn 100 ngày, kỷ niệm năm có thiệp chúc trong chat
+- **Buzz**: chủ app bấm "🔔 Buzzz" ở từng bữa để nhắc Ny bất cứ lúc nào (thông báo + rung + mèo kêu nếu Ny đang mở app)
+- **Hình nền tin nhắn**: 8 nền có sẵn hoặc ảnh của mình (mỗi người tự chọn)
+- **Tiếng mèo kêu** khi có tin nhắn, buzz, nhắc giờ ăn lúc app đang mở (`sounds/`)
 - Thông báo đẩy trên iPhone (cần thêm vào MH chính) và Android; cài như app
 
 ## Cấu trúc
@@ -26,11 +31,12 @@ supabase/schema.sql            Bảng, phân quyền (RLS), kho ảnh, realtime,
 supabase/setup.sql             Cấu hình sau khi deploy: URL function, mã mời, cron
 supabase/chat.sql              Bản 1.1: bảng tin nhắn, liên kết nhắc giờ ăn ↔ bài báo cáo
 supabase/v2.sql                Bản 2.0: giờ ăn chuẩn, tin nhắn ảnh/video, tim trong chat, chu kỳ chị 🍓
+supabase/v2_1.sql              Bản 2.1: hồ sơ (ngày sinh, sở thích), hình nền tin nhắn, buzz, thẻ sự kiện
 supabase/functions/notify/     Edge Function gửi Web Push (WebCrypto, không thư viện ngoài)
 ```
 
 ## Dựng lại từ đầu
-1. Tạo project Supabase (gói Free, vùng Singapore), chạy lần lượt `supabase/schema.sql`, `supabase/chat.sql`, `supabase/v2.sql`.
+1. Tạo project Supabase (gói Free, vùng Singapore), chạy lần lượt `supabase/schema.sql`, `supabase/chat.sql`, `supabase/v2.sql`, `supabase/v2_1.sql`.
 2. Deploy function `supabase/functions/notify` với **verify_jwt = false**.
 3. Chạy `supabase/setup.sql` (thay `__REF__`, `__SITE__`, `__INVITE__`).
 4. Authentication → Sign In / Providers → Email → tắt **Confirm email**.

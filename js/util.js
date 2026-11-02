@@ -336,3 +336,35 @@ export function cycleDayKinds(date, pred, today) {
   }
   return kinds;
 }
+
+// ====================================================================== SINH NHẬT & CUNG
+const isLeap = (y) => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+
+/** Sinh nhật kế tiếp tính từ hôm nay: { date, daysTo, turning } (29/2 năm không nhuận -> 1/3) */
+export function nextBirthday(bday, today = ymd(new Date())) {
+  const [y, m, d] = bday.split('-').map(Number);
+  const on = (yy) => (m === 2 && d === 29 && !isLeap(yy) ? `${yy}-03-01` : `${yy}-${pad(m)}-${pad(d)}`);
+  const ty = Number(today.slice(0, 4));
+  let date = on(ty);
+  if (date < today) date = on(ty + 1);
+  return { date, daysTo: daysBetween(today, date), turning: Number(date.slice(0, 4)) - y };
+}
+
+export function ageOf(bday, today = ymd(new Date())) {
+  const [y, m, d] = bday.split('-').map(Number);
+  const [ty, tm, td] = today.split('-').map(Number);
+  return ty - y - (tm < m || (tm === m && td < d) ? 1 : 0);
+}
+
+const ZODIAC = [
+  ['01-20', '♒', 'Bảo Bình'], ['02-19', '♓', 'Song Ngư'], ['03-21', '♈', 'Bạch Dương'], ['04-20', '♉', 'Kim Ngưu'],
+  ['05-21', '♊', 'Song Tử'], ['06-21', '♋', 'Cự Giải'], ['07-23', '♌', 'Sư Tử'], ['08-23', '♍', 'Xử Nữ'],
+  ['09-23', '♎', 'Thiên Bình'], ['10-23', '♏', 'Bọ Cạp'], ['11-22', '♐', 'Nhân Mã'], ['12-22', '♑', 'Ma Kết'],
+];
+/** Cung hoàng đạo theo ngày sinh: { icon, name } */
+export function zodiacOf(bday) {
+  const md = bday.slice(5);
+  let z = ZODIAC[ZODIAC.length - 1]; // trước 20/1 là Ma Kết
+  for (const item of ZODIAC) if (md >= item[0]) z = item;
+  return { icon: z[1], name: z[2] };
+}

@@ -1,7 +1,7 @@
-// Edge Function "notify" — thông báo cho app "Bé ăn chưa?" (bản 2.0)
+// Edge Function "notify" — thông báo cho app "Bé ăn chưa?" (bản 2.1)
 //   {type:"vapid"}            -> khoá công khai để điện thoại đăng ký nhận thông báo
-//   {type:"event", table, id} -> trigger CSDL gọi: bài mới, tim, tin nhắn, chị 🍓 tới/đi
-//   {type:"remind"}           -> cron 10 phút/lần: nhắc Ny trễ bữa + bản tin chị 🍓 lúc 8h sáng
+//   {type:"event", table, id} -> trigger CSDL gọi: bài mới, tim, tin nhắn, buzz, chị 🍓 tới/đi
+//   {type:"remind"}           -> cron 10 phút/lần: nhắc Ny trễ bữa + bản tin 8h sáng (chị 🍓, sinh nhật, kỷ niệm)
 //   {type:"test"}             -> người dùng bấm "Gửi thử" (cần đăng nhập)
 // Deploy với verify_jwt = false; các nhánh tự kiểm tra và chống gửi trùng.
 
@@ -82,11 +82,12 @@ interface Profile {
   id: string;
   display_name: string;
   avatar: string;
+  birthday?: string | null;
 }
 
 /** Hai người theo thứ tự tạo tài khoản: người đầu là chủ app, người thứ hai là Ny */
 async function couple() {
-  const rows = await rest<Profile[]>("profiles?select=id,display_name,avatar&order=created_at.asc");
+  const rows = await rest<Profile[]>("profiles?select=id,display_name,avatar,birthday&order=created_at.asc");
   const people = new Map(rows.map((r) => [r.id, r]));
   return { people, owner: rows[0] as Profile | undefined, ny: rows[1] as Profile | undefined };
 }
@@ -339,6 +340,80 @@ async function cycleDigest(settings: Record<string, unknown>) {
   return { events, out };
 }
 
+// ====================================================================== SINH NHẬT & KỶ NIỆM
+function nextBirthday(bday: string, today: string) {
+  const [y, m, d] = bday.split("-").map(Number);
+  const leap = (yy: number) => (yy % 4 === 0 && yy % 100 !== 0) || yy % 400 === 0;
+  const on = (yy: number) => (m === 2 && d === 29 && !leap(yy)) ? `${yy}-03-01` : `${yy}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const ty = Number(today.slice(0, 4));
+  let date = on(ty);
+  if (date < today) date = on(ty + 1);
+  return { date, daysTo: diffDays(today, date), turning: Number(date.slice(0, 4)) - y };
+}
+
+/** Thẻ sự kiện trong chat (mỗi người đọc một câu riêng) + thông báo cho cả hai */
+async function sendEventCard(event: string, title: string, nyText: string, ownerText: string, recipient: string, ny: Profile, owner: Profile) {
+  await rest("messages", {
+    method: "POST",
+    prefer: "return=minimal",
+    body: { sender_id: null, recipient_id: recipient, kind: "event", body: JSON.stringify({ event, title, ny: nyText, owner: ownerText }) },
+  }).catch((e) => console.warn("event message", String(e)));
+  const a = await pushTo([ny.id], { title, body: nyText, tag: `event-${event}`, url: "#/us" });
+  const b = await pushTo([owner.id], { title, body: ownerText, tag: `event-${event}`, url: "#/us" });
+  return { event, ny: a, owner: b };
+}
+
+async function loveDigest(settings: Record<string, unknown>) {
+  const { owner, ny } = await couple();
+  if (!owner || !ny) return { skipped: "no couple" };
+  const today = vnToday();
+  const out: unknown[] = [];
+  const nameOf = (p: Profile) => p.display_name;
+  for (const p of [ny, owner]) {
+    if (!p.birthday) continue;
+    const other = p.id === ny.id ? owner : ny;
+    const nb = nextBirthday(p.birthday, today);
+    if (nb.daysTo === 7 && (await firstTime(other.id, today, `bday7:${p.id}`))) {
+      out.push(await pushTo([other.id], {
+        title: `🎁 Còn 1 tuần là sinh nhật ${nameOf(p)}`,
+        body: `${nameOf(other)} lên kế hoạch quà cáp đi, mèo giữ bí mật cho 🤫`,
+        tag: `bday-${p.id}`,
+        url: "#/us",
+      }));
+    }
+    if (nb.daysTo === 1 && (await firstTime(other.id, today, `bday1:${p.id}`))) {
+      out.push(await pushTo([other.id], {
+        title: `🎂 Mai là sinh nhật ${nameOf(p)}!`,
+        body: `Bánh kem, hoa, quà đủ chưa ${nameOf(other)}? Mèo hỏi vậy thôi 😼`,
+        tag: `bday-${p.id}`,
+        url: "#/us",
+      }));
+    }
+    if (nb.daysTo === 0 && (await firstTime(p.id, today, `bday0:${p.id}`))) {
+      const self = `Chúc mừng sinh nhật ${nameOf(p)}! Tuổi ${nb.turning} ăn ngon ngủ kỹ, được thương nhiều nhất 💗`;
+      const toOther = `Hôm nay sinh nhật ${nameOf(p)} (${nb.turning} tuổi). ${nameOf(other)} nhớ chúc thật to, ôm thật chặt nha 🎉`;
+      out.push(await sendEventCard("birthday", `🎂 Sinh nhật ${nameOf(p)}!`,
+        p.id === ny.id ? self : toOther, p.id === owner.id ? self : toOther, p.id, ny, owner));
+    }
+  }
+  const start = String(settings.start_date ?? "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(start) && start <= today) {
+    const days = diffDays(start, today) + 1;
+    const years = Number(today.slice(0, 4)) - Number(start.slice(0, 4));
+    if (days % 100 === 0 && (await firstTime(owner.id, today, `love:${days}`))) {
+      out.push(await sendEventCard("love100", `💞 Tròn ${days} ngày yêu nhau!`,
+        `${days} ngày bên ${owner.display_name} rồi đó 🥰 Hôm nay đòi một bữa thật ngon nha!`,
+        `${days} ngày bên ${ny.display_name} rồi 🥰 ${owner.display_name} dẫn ${ny.display_name} đi ăn mừng đi!`, ny.id, ny, owner));
+    }
+    if (years >= 1 && today.slice(5) === start.slice(5) && (await firstTime(owner.id, today, `anniv:${years}`))) {
+      out.push(await sendEventCard("anniv", `💍 Kỷ niệm ${years} năm yêu nhau!`,
+        `Tròn ${years} năm bên ${owner.display_name} 💍 Cảm ơn vì đã cùng nhau ăn biết bao nhiêu bữa 🍲`,
+        `Tròn ${years} năm bên ${ny.display_name} 💍 Hôm nay là ngày của hai đứa, ${owner.display_name} chuẩn bị gì chưa?`, ny.id, ny, owner));
+    }
+  }
+  return { out };
+}
+
 // ====================================================================== SỰ KIỆN
 async function handleEvent(table: string, id: string) {
   if (!["meals", "comments", "reactions", "messages", "cycles"].includes(table) || !UUID_RE.test(id)) return { skipped: "bad input" };
@@ -357,9 +432,18 @@ async function handleEvent(table: string, id: string) {
   const { people } = await couple();
 
   if (table === "messages") {
-    if (row.kind !== "text") return { skipped: "not text" };
+    if (row.kind !== "text" && row.kind !== "buzz") return { skipped: "not text" };
     const sender = people.get(row.sender_id);
     const name = sender?.display_name ?? "Người thương";
+    if (row.kind === "buzz") {
+      const label = MEAL_LABEL[row.meal_type] ?? "bữa ăn";
+      return await pushTo(row.recipient_id ? [row.recipient_id] : [], {
+        title: `🔔 Buzzz! ${name} nhắc ${label} ${MEAL_ICON[row.meal_type] ?? ""}`.trim(),
+        body: truncate(row.body ?? "", 160) || `Ăn ${label} liền đi nha 🐱`,
+        tag: "buzz",
+        url: row.meal_type ? `#/new/${row.meal_type}${row.meal_date ? "/" + row.meal_date : ""}` : "#/chat",
+      });
+    }
     const to = row.recipient_id ? [row.recipient_id] : [...people.keys()].filter((uid) => uid !== row.sender_id);
     let body = truncate(row.body ?? "", 160);
     if (!body) body = row.media_type === "video" ? "🎬 Đã gửi một video" : row.media_type === "image" ? "📷 Đã gửi một ảnh" : "💌";
@@ -419,9 +503,10 @@ async function handleRemind() {
   const minutes = now.getUTCHours() * 60 + now.getUTCMinutes();
   const out: unknown[] = [];
 
-  // Bản tin chị 🍓 lúc 8h sáng
+  // Bản tin lúc 8h sáng: chị 🍓, sinh nhật, kỷ niệm ngày yêu
   if (minutes >= 8 * 60 && minutes < 8 * 60 + 30) {
     out.push({ cycle: await cycleDigest(settings).catch((e) => ({ error: String(e) })) });
+    out.push({ love: await loveDigest(settings).catch((e) => ({ error: String(e) })) });
   }
 
   if (settings.reminders_enabled === false) return { skipped: "meals off", out };

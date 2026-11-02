@@ -1,17 +1,20 @@
 // Service worker: chạy offline cơ bản + nhận thông báo đẩy
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const SHELL = `bac-shell-${VERSION}`;
 const RUNTIME = 'bac-runtime';
 const SHELL_FILES = [
   './',
   './index.html',
-  './css/app.css?v=2.0.0',
-  './js/app.js?v=2.0.0',
+  './css/app.css?v=2.1.0',
+  './js/app.js?v=2.1.0',
   './js/api.js',
   './js/config.js',
   './js/util.js',
   './js/media.js',
   './js/art.js',
+  './js/sound.js',
+  './sounds/meow.mp3',
+  './sounds/meow2.mp3',
   './js/vendor/supabase.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
@@ -93,7 +96,7 @@ self.addEventListener('push', (event) => {
       tag: d.tag || undefined,
       renotify: !!d.tag,
       data: { url: d.url || '#/' },
-      vibrate: [80, 40, 80],
+      vibrate: String(d.tag || '').startsWith('buzz') ? [220, 90, 220, 90, 420] : [80, 40, 80],
     }),
   );
 });

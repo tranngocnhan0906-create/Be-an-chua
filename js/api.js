@@ -4,6 +4,7 @@ import { CONFIG } from './config.js';
 
 const BUCKET = 'meals';
 const MSG_COLS = 'id,sender_id,recipient_id,kind,body,meal_type,meal_date,meal_id,media_type,media_path,thumb_path,width,height,duration,bytes,created_at,read_at';
+const PROFILE_COLS = 'id,display_name,avatar,created_at,birthday,info,chat_bg';
 const SIGNED_TTL = 7 * 24 * 3600; // link ảnh có hạn 7 ngày
 const SIGNED_CACHE_KEY = 'bac-signed-v1';
 
@@ -96,7 +97,7 @@ export const api = {
 
   async loadAll() {
     const [profiles, settingsRows, reactions, messages, cycles] = await Promise.all([
-      sb.from('profiles').select('id,display_name,avatar,created_at').order('created_at').then(must),
+      sb.from('profiles').select(PROFILE_COLS).order('created_at').then(must),
       sb.from('couple_settings').select('*').eq('id', 1).then(must),
       sb.from('reactions').select('id,meal_id,user_id,emoji,created_at').then(must),
       sb.from('messages').select(MSG_COLS).order('created_at', { ascending: false }).limit(800).then(must),
@@ -231,7 +232,7 @@ export const api = {
   },
 
   async updateProfile(uid, patch) {
-    return must(await sb.from('profiles').update(patch).eq('id', uid).select().single());
+    return must(await sb.from('profiles').update(patch).eq('id', uid).select(PROFILE_COLS).single());
   },
 
   subscribe(onChange, onStatus) {
