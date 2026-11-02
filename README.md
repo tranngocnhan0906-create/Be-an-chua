@@ -7,7 +7,7 @@ App nhỏ cho hai đứa mình: theo dõi giờ ăn của Ny, nhắn tin riêng 
   - Mỗi bữa hiện giờ đăng hình và trễ/sớm bao lâu so với giờ ăn
   - Quá giờ chưa có hình: thẻ **báo đỏ** kèm số phút trễ; ngày đã qua mà thiếu hình: "Bỏ bữa"
   - Đổi sang ngày khác bằng ‹ ›, xem cả tháng với chấm xanh/cam/đỏ và thống kê
-  - Chỉ Ny chụp/đăng báo cáo; chủ app xem, thả tim, bình luận, bấm "Nhắn nhắc ngay"
+  - Chỉ Ny chụp/đăng báo cáo; chủ app xem, thả tim, bình luận, bấm "🔔 Buzzz" nhắc từng bữa
 - **Tin nhắn** (nút tròn ở giữa): chữ, ảnh, video; trả lời nhanh, đã xem, thu hồi
   - Mỗi bài báo cáo, lượt thả tim, bình luận ảnh bữa ăn đều hiện trong khung chat
   - Mèo nhắc giờ ăn ngay trong chat (trễ 15 phút và trễ 1 tiếng), có nút **Gửi báo cáo**
